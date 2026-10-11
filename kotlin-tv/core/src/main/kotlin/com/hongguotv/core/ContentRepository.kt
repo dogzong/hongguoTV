@@ -57,6 +57,18 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         require(page in 1..100)
         return ComicRank.parse(text("$site/rank/hot-comic-drama?page=$page"),page)
     }
+    /** Full paginated lists linked from the four official recommendation shelves. */
+    fun recommendationRank(type: String,page: Int = 1): CatalogPage {
+        require(page in 1..100)
+        val (slug,rankKey,label)=when(type) {
+            "all" -> Triple("hot-drama","hongguo","短剧")
+            "human" -> Triple("hot-real-drama","real","真人剧")
+            "comic" -> Triple("hot-comic-drama","comic","漫剧")
+            "ai" -> Triple("hot-ai-drama","ai","AI剧")
+            else -> throw IllegalArgumentException("未知的官网推荐分区")
+        }
+        return ComicRank.parse(text("$site/rank/$slug"+if(page>1) "?page=$page" else ""),page,slug,rankKey,label)
+    }
     fun home(page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(page in 1..100)
         val recommendations=if(page==1) runCatching { homepageRecommendations() }.getOrDefault(emptyList()) else emptyList()

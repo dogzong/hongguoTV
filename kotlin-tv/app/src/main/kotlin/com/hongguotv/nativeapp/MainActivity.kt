@@ -302,8 +302,13 @@ class MainActivity: Activity() {
         collectionReturn=CatalogState(page,catalog,hasMore,ranking); collectionFocus=catalogFocus
         collection=kind; page=1; catalogFocus=""; showCatalog()
     }
+    private fun showRecommendation(type: String) {
+        collectionReturn=CatalogState(page,catalog,hasMore,ranking); collectionFocus=catalogFocus
+        collection="recommend:$type"; page=1; catalogFocus=""; showCatalog(true)
+    }
     private fun inlineHomeFilters()=tab==0 && resources.configuration.fontScale<=1.2f && widthDp()>=900
-    private fun localCatalog()=tab==3 || tab==4 || collection!=null
+    private fun recommendationCollection()=collection?.startsWith("recommend:")==true
+    private fun localCatalog()=tab==3 || tab==4 || (collection!=null && !recommendationCollection())
     private fun localItems(): List<Series> = when(collection) {
         "hot" -> collectionReturn?.items.orEmpty().filterNot { it.id in library.hidden() }
         "later" -> library.later()
@@ -315,7 +320,7 @@ class MainActivity: Activity() {
         initialCatalogPending=false; restoreStoppedPage=false; pendingDetail=null
         // Never cache a new page number with the previous page's results while a request is pending.
         if(load) {
-            val cached=if(tab==0 && page==1) library.cachedHome(library.contentType) else null
+            val cached=if(tab==0 && page==1 && collection==null) library.cachedHome(library.contentType) else null
             catalog=cached?.items ?: emptyList(); hasMore=cached?.hasMore ?: false; ranking=null; homeFromCache=cached!=null
         }
         invalidatePage(); screen="catalog"; releaseCatalogViews(); val container=base()
@@ -404,24 +409,29 @@ class MainActivity: Activity() {
         if(load) {
             if(tab==0) catalogGrid(body,focusNav,focusType,loading=true)
             else { message(body,"正在加载…"); if(focusType) typeButtons[library.contentType]?.requestFocus() else nav[tab].requestFocus() }
-            val requestTab=tab; val requestPage=page; val requestQuery=query; val requestType=library.contentType
+            val requestTab=tab; val requestPage=page; val requestQuery=query; val requestType=library.contentType; val requestCollection=collection
             work({
-                val result=when(requestTab) { 0 -> repository.home(requestPage,requestType); 2 -> repository.comicRanking(requestPage); else -> repository.search(requestQuery,requestPage,requestType) }
+                val result=when {
+                    requestTab==0 && requestCollection?.startsWith("recommend:")==true -> repository.recommendationRank(requestCollection.removePrefix("recommend:"),requestPage)
+                    requestTab==0 -> repository.home(requestPage,requestType)
+                    requestTab==2 -> repository.comicRanking(requestPage)
+                    else -> repository.search(requestQuery,requestPage,requestType)
+                }
                 result
             }, { result ->
-                if(requestTab==0 && requestPage==1) library.cacheHome(requestType,result.items,result.hasMore)
-                if(requestTab==0 && requestPage==1 && (homeFromCache || tvTools.showing || updater.showing)) {
+                if(requestTab==0 && requestCollection==null && requestPage==1) library.cacheHome(requestType,result.items,result.hasMore)
+                if(requestTab==0 && requestCollection==null && requestPage==1 && (homeFromCache || tvTools.showing || updater.showing)) {
                     homeScreen?.refresh?.text="热门已更新 · 按确认查看"
                     homeScreen?.refresh?.setOnClickListener { catalog=result.items; hasMore=result.hasMore; ranking=result.ranking; homepageRecommendations=result.recommendations; showCatalog() }
                 } else {
                     catalog=result.items; hasMore=result.hasMore; ranking=result.ranking
-                    if(requestTab==0 && requestPage==1) homepageRecommendations=result.recommendations
+                    if(requestTab==0 && requestCollection==null && requestPage==1) homepageRecommendations=result.recommendations
                     val keepNav=nav.any { it.hasFocus() }; val keepType=typeButtons.values.any { it.hasFocus() }
                     rankSubtitle?.text=ranking?.updatedText?.ifBlank { "来源：红果漫剧热播榜" } ?: "来源：红果漫剧热播榜"
                     body.removeAllViews(); catalogGrid(body,keepNav || focusNav,keepType || focusType)
                 }
             }, { problem ->
-                if(requestTab==0 && requestPage==1) {
+                if(requestTab==0 && requestCollection==null && requestPage==1) {
                     homeScreen?.refresh?.text=if(catalog.isNotEmpty()) "当前显示上次内容 · 联网后按确认刷新" else "热门暂时无法加载 · 按确认重试"
                     homeScreen?.refresh?.setOnClickListener { showCatalog(true) }
                     return@work
@@ -448,7 +458,13 @@ class MainActivity: Activity() {
                 nextFocusUpId=typeButtons[library.contentType]?.id ?: nav[tab].id
                 nextFocusDownId=id
             }
-            heading.addView(text(when(collection) { "later" -> "稍后看"; "updates" -> "收藏有更新"; "hot" -> "热门发现"; else -> "接着看" },22f))
+            val recommendationType=collection?.removePrefix("recommend:")
+            val recommendationTitle=homepageRecommendations.firstOrNull { it.type==recommendationType }?.title
+                ?: when(recommendationType) { "all" -> "热播短剧"; "human" -> "热播真人剧"; "comic" -> "热播漫剧"; "ai" -> "热播AI剧"; else -> "" }
+            heading.addView(text(when(collection) {
+                "later" -> "稍后看"; "updates" -> "收藏有更新"; "hot" -> "热门发现"
+                else -> if(recommendationCollection()) recommendationTitle else "接着看"
+            },22f))
             body.addView(heading)
             typeButtons.values.forEach { it.nextFocusDownId=collectionBack!!.id }
         }
@@ -499,7 +515,12 @@ class MainActivity: Activity() {
         var prev: View?=null; var next: View?=null
         if(tab<=2 || localCatalog()) {
             prev=addButton(paging,"上一页") { if(page>1) { page--; catalogFocus=""; showCatalog(!localCatalog()) } }.apply { isEnabled=page>1; isFocusable=page>1; alpha=if(page>1) 1f else .4f }
-            paging.addView(text(if(localCatalog()) "第 $page / ${maxOf(1,(catalog.size+pageSize-1)/pageSize)} 页" else if(tab==2 && ranking!=null) "第 $page / ${ranking!!.totalPages} 页" else "第 $page 页",14f,muted).apply { gravity=Gravity.CENTER },lp(dp(if(tab==2) 135 else 95),dp(44)))
+            val pageLabel=when {
+                localCatalog() -> "第 $page / ${maxOf(1,(catalog.size+pageSize-1)/pageSize)} 页"
+                (tab==2 || recommendationCollection()) && ranking!=null -> "第 $page / ${ranking!!.totalPages} 页"
+                else -> "第 $page 页"
+            }
+            paging.addView(text(pageLabel,14f,muted).apply { gravity=Gravity.CENTER },lp(dp(if(tab==2 || recommendationCollection()) 135 else 95),dp(44)))
             next=addButton(paging,"下一页") { if(hasMore) { page++; catalogFocus=""; showCatalog(!localCatalog()) } }.apply { isEnabled=hasMore; isFocusable=hasMore; alpha=if(hasMore) 1f else .4f }
             if(collection=="hot" && !hasMore && collectionReturn?.hasMore==true) {
                 next=addButton(paging,"下一批热门") { collection=null; collectionReturn=null; page=2; catalogFocus=""; showCatalog(true) }
@@ -587,7 +608,7 @@ class MainActivity: Activity() {
         val later=library.later(); val hidden=library.hidden(); val hot=catalog.filterNot { it.id in hidden }
         val recommendations=homepageRecommendations.mapNotNull { section ->
             val entries=section.items.filterNot { it.id in hidden }.map { HomeScreen.Entry(it,it.badge.ifBlank { "查看剧集" }) }
-            if(entries.isEmpty()) null else HomeScreen.Shelf("recommend-${section.type}",section.title,entries)
+            if(entries.isEmpty()) null else HomeScreen.Shelf("recommend-${section.type}",section.title,entries) { showRecommendation(section.type) }
         }
         return listOf(
             HomeScreen.Shelf("resume","接着看",recent.take(8).map { p -> HomeScreen.Entry(p.series,
