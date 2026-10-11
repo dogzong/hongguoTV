@@ -26,9 +26,9 @@ android {
     }
     buildTypes {
         getByName("debug") {
-            applicationIdSuffix = ".dev"
-            versionNameSuffix = "-dev"
-            manifestPlaceholders["appLabel"] = "红果 TV 开发版"
+            applicationIdSuffix = ".recommendation"
+            versionNameSuffix = "-recommendation"
+            manifestPlaceholders["appLabel"] = "红果 TV 推荐版"
         }
         getByName("release") { signingConfig = signingConfigs.getByName("delivery"); isMinifyEnabled = true; proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro") }
     }
