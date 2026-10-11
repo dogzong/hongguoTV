@@ -98,12 +98,19 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         require(keyword.isNotBlank() && keyword.length<=80 && page in 1..100)
         // The website search does not constrain content type. Never use it for comics.
         if(type==ContentType.COMIC) return appSearch(keyword,page,type)
-        try { val result=appSearch(keyword,page,type); if(result.items.isNotEmpty() || !result.hasMore) return result } catch (e: Exception) { if(e is SearchSessionExpiredException) throw e; /* Website fallback for short dramas only. */ }
-        val data=router("$site/search/${Signer.encode(keyword)}?page=$page")
-        val section=data.optJSONObject("search_(keyword)/page") ?: data.optJSONObject("search_page") ?: throw IOException("搜索数据暂不可用")
-        val rows=section.optJSONArray("searchList") ?: throw IOException("搜索数据结构已变化")
-        val items=valid(rows.objects().map(::card))
-        return CatalogPage(items,items.isNotEmpty() && page<100)
+        // The public site search is stable and carries the full result count. Use it first;
+        // the app's private signed endpoint remains a fallback when the site is unavailable.
+        try {
+            val data=router("$site/search/${Signer.encode(keyword)}?page=$page")
+            val section=data.optJSONObject("search_(keyword)/page") ?: data.optJSONObject("search_page") ?: throw IOException("搜索数据暂不可用")
+            val rows=section.optJSONArray("searchList") ?: throw IOException("搜索数据结构已变化")
+            val items=valid(rows.objects().map(::card))
+            val total=section.optInt("totalCount",0)
+            return CatalogPage(items,items.isNotEmpty() && (total==0 || page*items.size<total))
+        } catch (e: Exception) { /* Fall back to the signed app search below. */ }
+        val result=appSearch(keyword,page,type)
+        if(result.items.isNotEmpty() || !result.hasMore) return result
+        throw IOException("没有找到相关内容")
     }
     private fun appSearch(keyword: String, page: Int, type: ContentType): CatalogPage {
         val values=VendorConstants.device.toMutableMap()

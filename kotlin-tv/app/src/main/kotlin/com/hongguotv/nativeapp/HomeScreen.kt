@@ -39,7 +39,10 @@ class HomeScreen(
     private val selected: (Series,String)->Unit,
     private val open: (Series,Boolean)->Unit,
     private val actions: (Series,View)->Unit,
-    private val remember: (String)->Unit
+    private val remember: (String)->Unit,
+    private val selectRecommendation: (String)->Unit = {},
+    private val activeRecommendation: String = "all",
+    private val loadMoreRecommendation: ()->Unit = {}
 ): LinearLayout(context) {
     data class Entry(val series: Series,val label: String,val resume: Boolean=false,val progress: Int?=null)
     data class Shelf(val key: String,val title: String,val entries: List<Entry>,val more: (() -> Unit)?=null)
@@ -62,7 +65,12 @@ class HomeScreen(
     private var restoring=false
     private var revision=0
     val refresh=label("正在更新热门…",13f).apply { id=View.generateViewId(); tag="home:refresh"; isFocusable=true; isFocusableInTouchMode=true; gravity=Gravity.CENTER_VERTICAL; setPadding(dp(12),dp(8),dp(12),dp(8)); background=shape(false); setOnFocusChangeListener { _,f -> background=shape(f); if(f) lastFocus=tag.toString() } }
-    init { orientation=VERTICAL; scroll.addView(contents); addView(scroll,LayoutParams(-1,0,1f)) }
+    init {
+        orientation=VERTICAL; scroll.addView(contents); addView(scroll,LayoutParams(-1,0,1f))
+        scroll.setOnScrollChangeListener { _,_,y,_,_ ->
+            if(contents.height>0 && y+scroll.height>=contents.height-dp(420) && shelves.any { it.key=="recommend-feed" }) loadMoreRecommendation()
+        }
+    }
 
     fun capturePosition(): Position {
         val key=findFocus()?.tag?.toString()?.takeIf { it in cards || it=="home:refresh" || it=="home:more" } ?: lastFocus
@@ -106,14 +114,31 @@ class HomeScreen(
             val heading=LinearLayout(context).apply { orientation=HORIZONTAL; gravity=Gravity.CENTER_VERTICAL; setPadding(dp(2),dp(4),dp(2),dp(9)) }
             heading.addView(View(context).apply { background=TvStyle.shape(context,accent,radius=2) },LayoutParams(dp(3),dp(14)).apply { rightMargin=dp(8) })
             heading.addView(label(shelf.title,16f).apply { setTypeface(null,Typeface.BOLD) },LayoutParams(0,-2,1f))
-            heading.addView(label("左右选剧  ·  上下切换分区",10f,TvStyle.muted))
+            if(shelf.key=="recommend-feed") {
+                listOf("all" to "短剧","human" to "真人剧","comic" to "漫剧","ai" to "AI剧").forEach { (type,name) ->
+                    val chip=label(name,12f,if(type==activeRecommendation) TvStyle.accent else TvStyle.muted).apply {
+                        isFocusable=true; isFocusableInTouchMode=true; setPadding(dp(8),dp(5),dp(8),dp(5)); background=shape(type==activeRecommendation)
+                        setOnFocusChangeListener { v,f -> v.background=shape(f || type==activeRecommendation) }
+                        setOnClickListener { selectRecommendation(type) }
+                    }
+                    heading.addView(chip,LayoutParams(-2,-2).apply { leftMargin=dp(4) })
+                }
+            } else heading.addView(label("左右选剧  ·  上下切换分区",10f,TvStyle.muted))
             block.addView(heading)
             val horizontal=HorizontalScrollView(context).apply { isHorizontalScrollBarEnabled=false; clipToPadding=false; setPadding(dp(2),dp(2),dp(2),dp(2)) }
+            val waterfall=shelf.key=="recommend-feed" || shelf.key.startsWith("recommend-")
+            val columns=LinearLayout(context).apply { orientation=HORIZONTAL; gravity=Gravity.TOP }
+            val waterfallColumns=List(6) { LinearLayout(context).apply { orientation=VERTICAL } }
             val line=LinearLayout(context).apply { orientation=HORIZONTAL; gravity=Gravity.TOP }
-            horizontal.addView(line); block.addView(horizontal)
+            if(waterfall) {
+                waterfallColumns.forEachIndexed { index,column -> columns.addView(column,LayoutParams(0,-2,1f).apply {
+                    if(index>0) leftMargin=dp(7)
+                }) }
+                block.addView(columns,LayoutParams(-1,-2))
+            } else { horizontal.addView(line); block.addView(horizontal) }
             val rowCards=mutableListOf<Card>()
             fun addCard(entry: Entry?,moreAction: (() -> Unit)?=null) {
-                val width=((resources.displayMetrics.widthPixels*.9f-dp(70))/6).toInt().coerceAtLeast(dp(100))
+                val width=if(waterfall) ((resources.displayMetrics.widthPixels*.9f-dp(48))/6).toInt().coerceAtLeast(dp(92)) else ((resources.displayMetrics.widthPixels*.9f-dp(70))/6).toInt().coerceAtLeast(dp(100))
                 val key=if(entry!=null) "${shelf.key}:${entry.series.id}" else "${shelf.key}:more"
                 val view=LinearLayout(context).apply { orientation=VERTICAL; id=View.generateViewId(); tag=key; isFocusable=true; isFocusableInTouchMode=true; setPadding(dp(4),dp(4),dp(4),dp(8)); background=shape(false) }
                 val image=if(entry!=null) ImageView(context).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=IMPORTANT_FOR_ACCESSIBILITY_NO } else null
@@ -140,7 +165,13 @@ class HomeScreen(
                         lastRow=shelf.key
                     }
                 }
-                line.addView(view,LayoutParams(width,-1).apply { rightMargin=dp(14) }); rowCards+=card; cards[key]=card
+                if(waterfall && entry!=null) {
+                    val column=waterfallColumns[rowCards.size%waterfallColumns.size]
+                    column.addView(view,LayoutParams(-1,-2).apply { bottomMargin=dp(12) })
+                    val imageHeight=dp(if(rowCards.size%6==0) 190 else if(rowCards.size%6==1) 236 else if(rowCards.size%6==2) 208 else if(rowCards.size%6==3) 252 else if(rowCards.size%6==4) 182 else 220)
+                    image?.layoutParams=LayoutParams(-1,imageHeight)
+                } else line.addView(view,LayoutParams(width,-1).apply { rightMargin=dp(14) })
+                rowCards+=card; cards[key]=card
             }
             shelf.entries.forEach { addCard(it) }
             shelf.more?.let { action -> addCard(null,action) }
@@ -242,7 +273,7 @@ class HomeScreen(
     override fun onSizeChanged(w: Int,h: Int,oldw: Int,oldh: Int) { super.onSizeChanged(w,h,oldw,oldh); if(w!=oldw || h!=oldh) post { fitArtwork(); loadNearbySelection() } }
     private fun fitArtwork() {
         if(height<=0) return
-        rows.forEach { row ->
+        rows.filterNot { it.key.startsWith("recommend-") }.forEach { row ->
             val textHeight=row.cards.maxOf { item -> item.view.paddingTop+item.view.paddingBottom+(1 until item.view.childCount).sumOf { child ->
                 val view=item.view.getChildAt(child); val params=view.layoutParams as LayoutParams
                 view.measuredHeight+params.topMargin+params.bottomMargin
