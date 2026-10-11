@@ -20,7 +20,9 @@ data class Series(val id: String, val title: String, val cover: String = "", val
 data class Detail(val series: Series, val episodes: List<String>)
 data class RankPosition(val rank: Int?, val heat: String)
 data class ComicRanking(val positions: Map<String,RankPosition>, val totalPages: Int, val updatedText: String)
-data class CatalogPage(val items: List<Series>, val hasMore: Boolean, val ranking: ComicRanking? = null)
+data class RecommendationSection(val type: String, val title: String, val items: List<Series>)
+data class CatalogPage(val items: List<Series>, val hasMore: Boolean, val ranking: ComicRanking? = null,
+    val recommendations: List<RecommendationSection> = emptyList())
 data class StreamInfo(val url: String, val key: ByteArray?, val quality: String)
 class SearchSessionExpiredException: IOException("搜索结果已过期，请从第 1 页重新搜索")
 
@@ -57,13 +59,28 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     fun home(page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(page in 1..100)
-        if(type==ContentType.COMIC) return comicRanking(page)
+        val recommendations=if(page==1) runCatching { homepageRecommendations() }.getOrDefault(emptyList()) else emptyList()
+        if(type==ContentType.COMIC) return comicRanking(page).copy(recommendations=recommendations)
         val data=router("$site/category?tab=1&sort_type=1"+if(page>1) "&page=$page" else "")
         val section=data.optJSONObject("category_page") ?: data.optJSONObject("category_$") ?: throw IOException("首页数据结构已变化")
         val rows=section.optJSONArray("recommendList") ?: section.optJSONObject("categoryData")?.optJSONArray("recommendList") ?: throw IOException("首页数据暂不可用")
         val items=valid(rows.objects().map(::card))
         val lastPage=section.optJSONObject("pagination")?.optInt("totalPages",100) ?: 100
-        return CatalogPage(items,items.isNotEmpty() && page<minOf(lastPage,100))
+        return CatalogPage(items,items.isNotEmpty() && page<minOf(lastPage,100),recommendations=recommendations)
+    }
+    /** Public homepage recommendations, grouped by the sections the site itself exposes. */
+    private fun homepageRecommendations(): List<RecommendationSection> {
+        val root=extractRouter(text("$site/")).optJSONObject("loaderData")?.optJSONObject("page")
+            ?: throw IOException("官网推荐数据暂不可用")
+        val rows=root.optJSONArray("homeSections") ?: throw IOException("官网推荐格式已变化")
+        return rows.objects().mapNotNull { row ->
+            val type=row.str("tab_type")
+            val title=row.str("tab_name")
+            val videos=row.optJSONArray("video_list") ?: return@mapNotNull null
+            val items=valid(videos.objects().map(::card))
+            if(type.isBlank() || title.isBlank() || items.isEmpty()) null
+            else RecommendationSection(type,title,items)
+        }
     }
     fun search(keyword: String, page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(keyword.isNotBlank() && keyword.length<=80 && page in 1..100)

@@ -69,6 +69,7 @@ class MainActivity: Activity() {
     private var prefetchAttemptAt=0L
     private var prefetchAttempts=0
     private var homeScreen: HomeScreen?=null
+    private var homepageRecommendations=emptyList<RecommendationSection>()
     private var selectionPreview: SeriesPreview?=null
     private var homeFromCache=false
     private var homeUpdateCount=0
@@ -411,9 +412,10 @@ class MainActivity: Activity() {
                 if(requestTab==0 && requestPage==1) library.cacheHome(requestType,result.items,result.hasMore)
                 if(requestTab==0 && requestPage==1 && (homeFromCache || tvTools.showing || updater.showing)) {
                     homeScreen?.refresh?.text="热门已更新 · 按确认查看"
-                    homeScreen?.refresh?.setOnClickListener { catalog=result.items; hasMore=result.hasMore; ranking=result.ranking; showCatalog() }
+                    homeScreen?.refresh?.setOnClickListener { catalog=result.items; hasMore=result.hasMore; ranking=result.ranking; homepageRecommendations=result.recommendations; showCatalog() }
                 } else {
                     catalog=result.items; hasMore=result.hasMore; ranking=result.ranking
+                    if(requestTab==0 && requestPage==1) homepageRecommendations=result.recommendations
                     val keepNav=nav.any { it.hasFocus() }; val keepType=typeButtons.values.any { it.hasFocus() }
                     rankSubtitle?.text=ranking?.updatedText?.ifBlank { "来源：红果漫剧热播榜" } ?: "来源：红果漫剧热播榜"
                     body.removeAllViews(); catalogGrid(body,keepNav || focusNav,keepType || focusType)
@@ -583,6 +585,10 @@ class MainActivity: Activity() {
         val recent=library.history().filterNot { library.watched(it.series.id) }
         val updates=library.favorites().filter { (library.favoriteUpdate(it.id)?.added ?: 0)>0 }
         val later=library.later(); val hidden=library.hidden(); val hot=catalog.filterNot { it.id in hidden }
+        val recommendations=homepageRecommendations.mapNotNull { section ->
+            val entries=section.items.filterNot { it.id in hidden }.map { HomeScreen.Entry(it,it.badge.ifBlank { "查看剧集" }) }
+            if(entries.isEmpty()) null else HomeScreen.Shelf("recommend-${section.type}",section.title,entries)
+        }
         return listOf(
             HomeScreen.Shelf("resume","接着看",recent.take(8).map { p -> HomeScreen.Entry(p.series,
                 "第 ${p.episodeIndex+1} 集 · ${if(p.completed) "接着看下一集" else formatTime(p.position)}",true,
@@ -591,9 +597,10 @@ class MainActivity: Activity() {
             HomeScreen.Shelf("updates","收藏有更新",updates.take(8).map { HomeScreen.Entry(it,library.favoriteLabel(it.id),true) },
                 if(updates.size>8) { { showCollection("updates") } } else null),
             HomeScreen.Shelf("later","稍后看",later.take(10).map { HomeScreen.Entry(it,"稍后看 · 长按管理") },
-                if(later.size>10) { { showCollection("later") } } else null),
-            HomeScreen.Shelf("hot","热门发现 · ${library.contentType.label}",hot.take(10).map { HomeScreen.Entry(it,it.badge.ifBlank { "查看剧集" }) },
-                if(hot.size>10) { { showCollection("hot") } } else null))
+                if(later.size>10) { { showCollection("later") } } else null)) +
+            if(recommendations.isNotEmpty()) recommendations else listOf(
+                HomeScreen.Shelf("hot","热门发现 · ${library.contentType.label}",hot.take(10).map { HomeScreen.Entry(it,it.badge.ifBlank { "查看剧集" }) },
+                    if(hot.size>10) { { showCollection("hot") } } else null))
     }
     private fun refreshLibraryCards(changedId: String,removed: Boolean=false) {
         if(screen!="catalog") return

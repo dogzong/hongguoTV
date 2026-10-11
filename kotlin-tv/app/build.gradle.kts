@@ -9,6 +9,7 @@ android {
     compileSdk = 36
     defaultConfig {
         applicationId = "com.hongguotv.nativeapp"
+        manifestPlaceholders["appLabel"] = "红果 TV 原生版"
         minSdk = 26
         targetSdk = 36
         versionCode = System.getenv("HONGGUOTV_VERSION_CODE")?.toInt() ?: 9
@@ -23,7 +24,14 @@ android {
             keyPassword = signingValue("HONGGUOTV_KEY_PASSWORD", "keyPassword")
         }
     }
-    buildTypes { getByName("release") { signingConfig = signingConfigs.getByName("delivery"); isMinifyEnabled = true; proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro") } }
+    buildTypes {
+        getByName("debug") {
+            applicationIdSuffix = ".dev"
+            versionNameSuffix = "-dev"
+            manifestPlaceholders["appLabel"] = "红果 TV 开发版"
+        }
+        getByName("release") { signingConfig = signingConfigs.getByName("delivery"); isMinifyEnabled = true; proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro") }
+    }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17; isCoreLibraryDesugaringEnabled = true }
     kotlinOptions { jvmTarget = "17" }
     packaging { resources.excludes += setOf("META-INF/versions/**", "META-INF/*.kotlin_module") }
