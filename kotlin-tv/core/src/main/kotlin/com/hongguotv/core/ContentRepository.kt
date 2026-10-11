@@ -82,12 +82,15 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         return CatalogPage(items,items.isNotEmpty() && page<minOf(lastPage,100),recommendations=recommendations,newReleases=newReleases)
     }
     /** Official public catalog sorted by newest releases (sort_type=2). */
-    fun newReleases(page: Int = 1): List<Series> {
+    fun newReleases(page: Int = 1): List<Series> = newReleasePage(page).items
+    fun newReleasePage(page: Int = 1): CatalogPage {
         require(page in 1..100)
         val data=router("$site/category?tab=1&sort_type=2"+(if(page>1) "&page=$page" else ""))
         val section=data.optJSONObject("category_page") ?: data.optJSONObject("category_$") ?: throw IOException("新剧列表数据结构已变化")
         val rows=section.optJSONArray("recommendList") ?: section.optJSONObject("categoryData")?.optJSONArray("recommendList") ?: throw IOException("新剧列表暂不可用")
-        return valid(rows.objects().map(::card))
+        val items=valid(rows.objects().map(::card))
+        val lastPage=section.optJSONObject("pagination")?.optInt("totalPages",100) ?: 100
+        return CatalogPage(items,items.isNotEmpty() && page<minOf(lastPage,100))
     }
     /** Public homepage recommendations, grouped by the sections the site itself exposes. */
     private fun homepageRecommendations(): List<RecommendationSection> {

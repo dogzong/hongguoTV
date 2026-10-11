@@ -72,12 +72,13 @@ class HomeScreen(
     init {
         orientation=VERTICAL; scroll.addView(contents); addView(scroll,LayoutParams(-1,0,1f))
         scroll.setOnScrollChangeListener { _,_,y,_,_ ->
+            loadFeedNearViewport()
             if(contents.height>0 && y+scroll.height>=contents.height-dp(420) && shelves.any { it.key=="recommend-feed" }) loadMoreRecommendation()
         }
     }
 
     fun capturePosition(): Position {
-        val key=findFocus()?.tag?.toString()?.takeIf { it in cards || it=="home:refresh" || it=="home:more" } ?: lastFocus
+        val key=findFocus()?.tag?.toString()?.takeIf { it in cards || it.startsWith("home:") } ?: lastFocus
         val row=rows.indexOfFirst { item -> item.cards.any { it.key==key } }
         val column=rows.getOrNull(row)?.cards?.indexOfFirst { it.key==key } ?: 0
         return Position(key,rows.getOrNull(row)?.key,column.coerceAtLeast(0),row.coerceAtLeast(0),scroll.scrollY,rows.associate { it.key to it.horizontal.scrollX })
@@ -142,7 +143,7 @@ class HomeScreen(
         this.shelves=shelves; footerMore=more; revision++; val ticket=revision; restoring=true
         contents.removeAllViews(); rows.clear(); cards.clear(); moreButton=null; lastRow=null
         recommendationBlock=null; appendRecommendation=null; recommendationChips.clear()
-        shelves.filter { it.entries.isNotEmpty() || it.more!=null }.forEach { shelf ->
+        shelves.filter { it.entries.isNotEmpty() || it.more!=null || it.key=="recommend-feed" }.forEach { shelf ->
             val block=LinearLayout(context).apply { orientation=VERTICAL }
             val heading=LinearLayout(context).apply { orientation=HORIZONTAL; gravity=Gravity.CENTER_VERTICAL; setPadding(dp(2),dp(4),dp(2),dp(9)) }
             heading.addView(View(context).apply { background=TvStyle.shape(context,accent,radius=2) },LayoutParams(dp(3),dp(14)).apply { rightMargin=dp(8) })
@@ -160,9 +161,9 @@ class HomeScreen(
             block.addView(heading)
             if(shelf.key=="recommend-feed") {
                 val filters=LinearLayout(context).apply { orientation=HORIZONTAL; gravity=Gravity.CENTER_VERTICAL; setPadding(0,dp(10),0,dp(12)) }
-                listOf("all" to "短剧推荐","human" to "真人剧","comic" to "漫剧","ai" to "AI剧").forEach { (type,name) ->
+                listOf("all" to "热播短剧","human" to "热播真人","comic" to "热播漫剧","ai" to "热播AI","new" to "新剧推荐").forEach { (type,name) ->
                     val chip=TextView(context).apply {
-                        id=View.generateViewId(); text=name; textSize=17f; includeFontPadding=false; gravity=Gravity.CENTER
+                        id=View.generateViewId(); tag="home:filter:$type"; text=name; textSize=17f; includeFontPadding=false; gravity=Gravity.CENTER
                         setTextColor(if(type==activeRecommendation()) TvStyle.text else TvStyle.muted)
                         isFocusable=true; isFocusableInTouchMode=true; minHeight=dp(48); setPadding(dp(14),dp(10),dp(14),dp(10))
                         background=TvStyle.card(context,type==activeRecommendation())
@@ -178,7 +179,7 @@ class HomeScreen(
                 block.addView(filters)
                 recommendationBlock=block
             }
-            val horizontal=HorizontalScrollView(context).apply { isHorizontalScrollBarEnabled=false; clipToPadding=false; setPadding(dp(2),dp(2),dp(2),dp(2)) }
+            val horizontal=HorizontalScrollView(context).apply { isFillViewport=true; isHorizontalScrollBarEnabled=false; clipToPadding=false; setPadding(dp(2),dp(2),dp(2),dp(2)) }
             val gridMode=shelf.key=="recommend-feed" || shelf.key.startsWith("recommend-")
             val grid=GridLayout(context).apply { columnCount=6; orientation=GridLayout.HORIZONTAL; useDefaultMargins=false }
             val line=LinearLayout(context).apply { orientation=HORIZONTAL; gravity=Gravity.TOP }
@@ -276,16 +277,32 @@ class HomeScreen(
                 }
                 card.view.nextFocusDownId=when {
                     row.cards.getOrNull(sameColumnAfter)!=null -> row.cards[sameColumnAfter].view.id
-                    row.cards.getOrNull(j+1)!=null -> row.cards[j+1].view.id
+                    indexInColumn<(row.cards.lastIndex/6) -> row.cards.last().view.id
                     else -> refresh.id
                 }
             } else {
                 card.view.nextFocusLeftId=row.cards[(j-1).coerceAtLeast(0)].view.id
                 card.view.nextFocusRightId=row.cards[(j+1).coerceAtMost(row.cards.lastIndex)].view.id
                 card.view.nextFocusUpId=if(i==0) top.id else rows[i-1].cards[j.coerceAtMost(rows[i-1].cards.lastIndex)].view.id
-                card.view.nextFocusDownId=if(i==rows.lastIndex) refresh.id else rows[i+1].cards[j.coerceAtMost(rows[i+1].cards.lastIndex)].view.id
+                card.view.nextFocusDownId=if(i==rows.lastIndex) refresh.id else if(rows[i+1].key=="recommend-feed") recommendationChips.values.elementAtOrNull(j.coerceAtMost((recommendationChips.size-1).coerceAtLeast(0)))?.id ?: refresh.id else rows[i+1].cards[j.coerceAtMost(rows[i+1].cards.lastIndex)].view.id
             }
         } }
+        val chips=recommendationChips.values.toList()
+        val feed=rows.firstOrNull { it.key=="recommend-feed" }
+        val discovery=contents.findViewWithTag<View>("home:discovery")
+        chips.forEachIndexed { index,chip ->
+            chip.nextFocusLeftId=chips.getOrNull(index-1)?.id ?: chip.id
+            chip.nextFocusRightId=chips.getOrNull(index+1)?.id ?: chip.id
+            chip.nextFocusUpId=discovery?.id ?: top.id
+            chip.nextFocusDownId=feed?.cards?.getOrNull(index)?.view?.id ?: refresh.id
+        }
+        discovery?.apply {
+            nextFocusDownId=recommendationChips[activeRecommendation()]?.id ?: refresh.id
+            nextFocusUpId=rows.takeWhile { it.key!="recommend-feed" }.lastOrNull()?.cards?.lastOrNull()?.view?.id ?: top.id
+        }
+        feed?.cards?.take(6)?.forEachIndexed { index,card ->
+            card.view.nextFocusUpId=chips.getOrNull(index.coerceAtMost(chips.lastIndex))?.id ?: top.id
+        }
     }
 
     private fun loadFeedNearViewport() {
@@ -308,6 +325,7 @@ class HomeScreen(
     }
 
     private fun target(key: String,position: Position?): View {
+        contents.findViewWithTag<View>(key)?.let { return it }
         if(key=="home:refresh") return refresh
         if(key=="home:more") moreButton?.let { return it }
         cards[key]?.let { return it.view }
@@ -315,7 +333,7 @@ class HomeScreen(
             val row=rows.firstOrNull { it.key==position.shelf } ?: rows.getOrNull(position.row.coerceAtMost(rows.lastIndex))
             row?.cards?.getOrNull(position.column.coerceAtMost(row.cards.lastIndex))?.let { return it.view }
         }
-        return cards.values.firstOrNull()?.view ?: refresh
+        return cards.values.firstOrNull()?.view ?: recommendationChips.values.firstOrNull() ?: refresh
     }
     private fun restoreOffsets(position: Position) {
         rows.forEach { row -> row.horizontal.scrollTo(position.horizontal[row.key] ?: 0,0) }
@@ -331,7 +349,13 @@ class HomeScreen(
             val target=when { card.left<left -> card.left; card.right>right -> card.right-horizontal.width+horizontal.paddingRight; else -> left }
             if(target!=left) horizontal.scrollTo(target.coerceAtLeast(0),0)
         }
-        reveal(row.block,false)
+        if(row.key=="recommend-feed") {
+            row.cards.firstOrNull { it.view.hasFocus() }?.view?.let { card ->
+                val rect=android.graphics.Rect(); card.getDrawingRect(rect); contents.offsetDescendantRectToMyCoords(card,rect)
+                val y=when { rect.top<scroll.scrollY -> rect.top; rect.bottom>scroll.scrollY+scroll.height -> rect.bottom-scroll.height; else -> scroll.scrollY }
+                scroll.scrollTo(0,y.coerceAtLeast(0))
+            }
+        } else reveal(row.block,false)
     }
     private fun reveal(block: View,smooth: Boolean=true) {
         val target=if(smooth) block.top else when { block.top<scroll.scrollY -> block.top; block.bottom>scroll.scrollY+scroll.height -> if(block.height>=scroll.height) block.top else block.bottom-scroll.height; else -> scroll.scrollY }.coerceAtLeast(0)
@@ -377,5 +401,5 @@ class HomeScreen(
             row.cards.forEach { card -> card.view.getChildAt(0).let { artwork -> if(artwork.layoutParams.height!=imageHeight) artwork.layoutParams=artwork.layoutParams.apply { height=imageHeight } } }
         }
     }
-    fun firstId()=rows.firstOrNull()?.cards?.firstOrNull()?.view?.id ?: refresh.id
+    fun firstId()=rows.firstOrNull()?.cards?.firstOrNull()?.view?.id ?: recommendationChips.values.firstOrNull()?.id ?: refresh.id
 }

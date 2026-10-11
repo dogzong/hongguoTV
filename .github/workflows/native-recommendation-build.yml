@@ -20,8 +20,13 @@ jobs:
         with:
           packages: platform-tools
       - run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+      - name: Restore recommendation development signing key
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.android/debug.keystore
+          key: hongguotv-recommendation-signing-v1
       - name: Assemble installable development APK
-        run: ./kotlin-tv/gradlew -p kotlin-tv :app:assembleDebug --console=plain
+        run: ./kotlin-tv/gradlew -p kotlin-tv :core:test :app:assembleDebug --console=plain
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: hongguotv-recommendation-dev-apk

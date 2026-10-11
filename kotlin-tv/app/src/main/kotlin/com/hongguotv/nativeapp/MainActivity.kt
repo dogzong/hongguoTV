@@ -74,6 +74,11 @@ class MainActivity: Activity() {
     private var discoveryQueue=emptyList<Series>()
     private var discoveryIndex=0
     private var discoveryPlayback=false
+    private var discoverySeriesPlayback=false
+    private var discoveryConfirmHeld=false
+    private var discoveryConfirmAt=0L
+    private var playbackHint: TextView?=null
+    private var discoveryInfo: TextView?=null
     private val discoveryUnavailable=mutableSetOf<String>()
     private var activeRecommendationType="all"
     private val recommendationNextPage=mutableMapOf<String,Int>()
@@ -597,11 +602,10 @@ class MainActivity: Activity() {
             { item,resume -> openDetail(item,resume) },::quickActions,{ catalogFocus=it },
             { type ->
                 activeRecommendationType=type
-                recommendationNextPage[type]=1
-                recommendationLoading.remove(type)
                 homeScreen?.updateShelves(homeShelves(),requestFocus=false)
                 homeScreen?.scrollToRecommendation()
                 homeScreen?.focusRecommendation(type)
+                loadMoreRecommendations()
             },
             { activeRecommendationType },{ loadMoreRecommendations() },{ startDiscoveryPlayback() })
         homeScreen=home; body.addView(home,lp(-1,0).apply { weight=1f })
@@ -610,6 +614,7 @@ class MainActivity: Activity() {
             if(hasMore) { { page=2; catalogFocus=""; showCatalog(true) } } else null,homePosition)
         home.refresh.text=if(loading) if(homeFromCache) "已显示上次内容 · 正在更新热门…" else "正在更新热门…" else "刷新热门"
         home.refresh.setOnClickListener { showCatalog(true) }
+        if(!loading) home.post { if(homeScreen===home) loadMoreRecommendations() }
         typeButtons.values.forEach { it.nextFocusDownId=home.firstId() }
         if(inlineHomeFilters()) nav.forEach { it.nextFocusDownId=home.firstId() }
         if(focusNav) nav[0].requestFocus() else if(focusType) typeButtons.getValue(library.contentType).requestFocus()
@@ -627,7 +632,8 @@ class MainActivity: Activity() {
         val updates=library.favorites().filter { (library.favoriteUpdate(it.id)?.added ?: 0)>0 }
         val later=library.later(); val hidden=library.hidden(); val hot=catalog.filterNot { it.id in hidden }
         val recommendation=homepageRecommendations.firstOrNull { it.type==activeRecommendationType }
-        val entries=recommendation?.items.orEmpty().filterNot { it.id in hidden }.map { HomeScreen.Entry(it,it.badge.ifBlank { "查看剧集" }) }
+        val recommendationItems=if(activeRecommendationType=="new") homeNewReleases else recommendation?.items.orEmpty().ifEmpty { if(activeRecommendationType=="all") hot else emptyList() }
+        val entries=recommendationItems.filterNot { it.id in hidden }.map { HomeScreen.Entry(it,it.badge.ifBlank { "查看剧集" }) }
         return listOf(
             HomeScreen.Shelf("resume","接着看",recent.take(8).map { p -> HomeScreen.Entry(p.series,
                 "第 ${p.episodeIndex+1} 集 · ${if(p.completed) "接着看下一集" else formatTime(p.position)}",true,
@@ -636,14 +642,13 @@ class MainActivity: Activity() {
             HomeScreen.Shelf("updates","收藏有更新",updates.take(8).map { HomeScreen.Entry(it,library.favoriteLabel(it.id),true) },
                 if(updates.size>8) { { showCollection("updates") } } else null),
             HomeScreen.Shelf("later","稍后看",later.take(10).map { HomeScreen.Entry(it,"稍后看 · 长按管理") },
-                if(later.size>10) { { showCollection("later") } } else null),
-            HomeScreen.Shelf("new-releases","新剧推荐",homeNewReleases.filterNot { it.id in hidden }.map { HomeScreen.Entry(it,it.badge.ifBlank { "新上架" }) })) +
-            listOf(HomeScreen.Shelf("recommend-feed",recommendation?.title ?: "红果推荐",entries))
+                if(later.size>10) { { showCollection("later") } } else null)) +
+            listOf(HomeScreen.Shelf("recommend-feed",if(activeRecommendationType=="new") "新剧推荐" else recommendation?.title ?: "热播短剧",entries))
     }
     private fun startDiscoveryPlayback() {
         val candidates=(catalog+homeNewReleases+homepageRecommendations.flatMap { it.items }).filterNot { it.id in library.hidden() }.distinctBy { it.id }
         if(candidates.isEmpty()) { Toast.makeText(this,"推荐内容还在加载，请稍后刷新",Toast.LENGTH_SHORT).show(); return }
-        discoveryQueue=candidates.shuffled(); discoveryIndex=0; discoveryUnavailable.clear(); discoveryPlayback=true
+        discoveryQueue=candidates.shuffled(); discoveryIndex=0; discoveryUnavailable.clear(); discoveryPlayback=true; discoverySeriesPlayback=false
         openDiscoverySeries(discoveryQueue[discoveryIndex])
     }
     private fun openDiscoverySeries(series: Series) {
@@ -676,21 +681,46 @@ class MainActivity: Activity() {
         openDiscoverySeries(discoveryQueue[discoveryIndex])
     }
     private fun loadMoreRecommendations() {
+        if(screen!="catalog" || homeScreen==null) return
         val type=activeRecommendationType
         if(type in recommendationLoading) return
         val next=recommendationNextPage[type] ?: 1
         if(next<1) return
         recommendationLoading+=type
-        work({ repository.recommendationRank(type,next) },{ result ->
-            recommendationLoading-=type
-            if(activeRecommendationType!=type) return@work
-            val old=homepageRecommendations.firstOrNull { it.type==type }
-            val merged=(old?.items.orEmpty()+result.items).distinctBy { it.id }
-            val title=old?.title ?: when(type) { "human"->"热播真人剧"; "comic"->"热播漫剧"; "ai"->"热播AI剧"; else->"热播短剧" }
-            homepageRecommendations=homepageRecommendations.filterNot { it.type==type }+RecommendationSection(type,title,merged)
-            recommendationNextPage[type]=if(result.hasMore) next+1 else -1
-            homeScreen?.updateShelves(homeShelves(),requestFocus=false)
-        },{ recommendationLoading-=type; android.util.Log.w("HongguoTV","Recommendation feed load failed type=$type page=$next",it) })
+        val ticket=generation
+        io.submit {
+            val result=runCatching { if(type=="new") repository.newReleasePage(next) else repository.recommendationRank(type,next) }
+            main.post {
+                recommendationLoading-=type
+                if(isDestroyed || generation!=ticket || screen!="catalog") return@post
+                result.fold({ data ->
+                    if(type=="new") homeNewReleases=(homeNewReleases+data.items).distinctBy { it.id }
+                    else {
+                        val old=homepageRecommendations.firstOrNull { it.type==type }
+                        val merged=(old?.items.orEmpty()+data.items).distinctBy { it.id }
+                        val title=old?.title ?: when(type) { "human"->"热播真人剧"; "comic"->"热播漫剧"; "ai"->"热播AI剧"; else->"热播短剧" }
+                        homepageRecommendations=homepageRecommendations.filterNot { it.type==type }+RecommendationSection(type,title,merged)
+                    }
+                    recommendationNextPage[type]=if(data.hasMore) next+1 else -1
+                    if(activeRecommendationType==type) {
+                        homeScreen?.refresh?.text="刷新热门"
+                        homeScreen?.updateShelves(homeShelves(),requestFocus=false)
+                    }
+                },{ problem ->
+                    android.util.Log.w("HongguoTV","Recommendation feed load failed type=$type page=$next",problem)
+                    if(activeRecommendationType==type) homeScreen?.refresh?.apply {
+                        text="列表加载失败 · 按确认重试"
+                        setOnClickListener { loadMoreRecommendations() }
+                    }
+                })
+            }
+        }
+    }
+    private fun confirmDiscovery() {
+        if(!discoveryPlayback) return
+        discoveryConfirmAt=android.os.SystemClock.elapsedRealtime()
+        discoveryPlayback=false; discoverySeriesPlayback=true
+        playEpisode(0,autoplay=true)
     }
     private fun refreshLibraryCards(changedId: String,removed: Boolean=false) {
         if(screen!="catalog") return
@@ -834,7 +864,7 @@ class MainActivity: Activity() {
         })
     }
     private fun openDetail(series: Series,resume: Boolean=false,autoplay: Boolean=true) {
-        discoveryPlayback=false
+        discoveryPlayback=false; discoverySeriesPlayback=false
         pendingDetail=series; detailAutoplay=autoplay
         invalidatePage(); releaseCatalogViews(); screen="detail"; directPlayback=resume; detail=null; synopsisExpanded=false
         val body=base(series.title); message(body,"正在加载剧集…")
@@ -937,11 +967,14 @@ class MainActivity: Activity() {
             playbackTitle=text("",23f).apply { maxLines=1; ellipsize=TextUtils.TruncateAt.END; setTypeface(null,Typeface.BOLD) }; hud.addView(playbackTitle)
             playbackText=text("",15f,muted).apply { setPadding(0,dp(10),0,dp(9)) }; hud.addView(playbackText)
             progressBar=ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal).apply { max=1000; progressTintList=android.content.res.ColorStateList.valueOf(accent); progressBackgroundTintList=android.content.res.ColorStateList.valueOf(surface) }; hud.addView(progressBar,lp(-1,dp(4)))
-            hud.addView(text("确认 暂停/播放    左右 快退/快进    ↓ 选集    ↑ 更多    返回 收起 / 退出",13f,muted).apply { setPadding(0,dp(12),0,0) })
+            discoveryInfo=text("",14f,muted).apply { maxLines=2; ellipsize=TextUtils.TruncateAt.END; setPadding(0,dp(8),0,0) }; hud.addView(discoveryInfo)
+            playbackHint=text("",13f,muted).apply { setPadding(0,dp(12),0,0) }; hud.addView(playbackHint)
             controls=column().apply { setPadding(0,dp(12),0,0); visibility=View.GONE }; hud.addView(controls)
             root.addView(ScrollView(this).apply { isVerticalScrollBarEnabled=false; addView(hud) },FrameLayout.LayoutParams(-1,-2,Gravity.BOTTOM))
         }
         playbackTitle.text="${data.series.title}  ·  第 ${episodeIndex+1} 集"
+        discoveryInfo?.apply { text=listOf(data.series.badge,data.series.tags,data.series.description).filter { it.isNotBlank() }.joinToString("  ·  "); visibility=if(discoveryPlayback) View.VISIBLE else View.GONE }
+        playbackHint?.text=if(discoveryPlayback) "↑ ↓ 换一部    OK 从第 1 集连续播放    返回 退出推荐" else "确认 暂停/播放    左右 快退/快进    ↓ 选集    ↑ 更多    返回 收起 / 退出"
         playbackText.text="正在获取播放地址…"; progressBar.progress=0; progressBar.visibility=View.VISIBLE; hidePlaybackOverlay()
         controls.removeAllViews(); controls.visibility=View.GONE; transportPlay=null; sleepButton=null
         syncMediaSession()
@@ -975,7 +1008,8 @@ class MainActivity: Activity() {
                     if(state==Player.STATE_ENDED) {
                         saveProgress(true)
                         if(sleepTimer.episodeEnded()) stopForSleep()
-                        else if(discoveryPlayback && foreground && requestedAutoplay && !pausedForLifecycle) playEpisode(0)
+                        else if(discoveryPlayback && foreground && requestedAutoplay && !pausedForLifecycle) confirmDiscovery()
+                        else if(discoverySeriesPlayback && foreground && requestedAutoplay && !pausedForLifecycle) playEpisode((episodeIndex+1)%data.episodes.size)
                         else if(foreground && requestedAutoplay && !pausedForLifecycle && library.autoNext && episodeIndex<data.episodes.lastIndex) playEpisode(episodeIndex+1)
                         else { requestedAutoplay=false; p.pause(); playbackText.text="本集已结束"; showPanel() }
                     }
@@ -1060,12 +1094,12 @@ class MainActivity: Activity() {
     }
     private fun hidePlaybackOverlay() {
         main.removeCallbacks(hideHud)
-        panel=false; controls.visibility=View.GONE; controls.clearFocus(); hud.visibility=View.GONE
+        panel=false; controls.visibility=View.GONE; controls.clearFocus(); hud.visibility=if(discoveryPlayback) View.VISIBLE else View.GONE
     }
     private fun showHud() {
         if(screen!="player") return
         hud.visibility=View.VISIBLE; updatePlaybackText(); main.removeCallbacks(hideHud)
-        if(!panel && player?.isPlaying==true) main.postDelayed(hideHud,4500)
+        if(!discoveryPlayback && !panel && player?.isPlaying==true) main.postDelayed(hideHud,4500)
     }
     private fun updatePlaybackText() {
         transportPlay?.text=if(player?.playWhenReady==true) "暂停" else "播放"
@@ -1080,6 +1114,7 @@ class MainActivity: Activity() {
         progressBar.progress=if(duration>0) (position*1000/duration).toInt().coerceIn(0,1000) else 0
     }
     private fun requestPlayback(play: Boolean) {
+        if(!play && (discoveryConfirmHeld || android.os.SystemClock.elapsedRealtime()-discoveryConfirmAt<750)) return
         requestedAutoplay=play; pausedForLifecycle=!play
         if(play) sleepStopped=false
         if(!play) { player?.pause(); retryAutoplay=false; saveProgress() }
@@ -1246,14 +1281,14 @@ class MainActivity: Activity() {
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
     private fun returnToDetail(forceDetail: Boolean=false) {
-        discoveryPlayback=false
+        discoveryPlayback=false; discoverySeriesPlayback=false
         sleepTimer.cancel(); sleepStopped=false; saveProgress(); library.flush(); invalidatePage(); releasePlayer()
         if(directPlayback && !forceDetail) showCatalog() else { directPlayback=false; showDetail(true) }
     }
     private fun goBack() {
         if(!library.isLoaded) { finish(); return }
         when(screen) {
-            "player" -> if(hud.visibility==View.VISIBLE && !playError) hidePlaybackOverlay() else returnToDetail()
+            "player" -> if(discoveryPlayback) returnToDetail() else if(hud.visibility==View.VISIBLE && !playError) hidePlaybackOverlay() else returnToDetail()
             "detail" -> showCatalog()
             else -> if(collection!=null) { leaveCollection(); showCatalog() } else if(nav.any { it.hasFocus() }) { if(tab!=0) { switchTab(0); nav[0].requestFocus() } else finish() } else nav.getOrNull(tab)?.requestFocus()
         }
@@ -1264,6 +1299,15 @@ class MainActivity: Activity() {
         if(screen=="player") {
             val key=event.keyCode
             if(key==KeyEvent.KEYCODE_BACK) { if(event.action==KeyEvent.ACTION_UP) goBack(); return true }
+            val confirmKey=key in listOf(KeyEvent.KEYCODE_DPAD_CENTER,KeyEvent.KEYCODE_ENTER,KeyEvent.KEYCODE_NUMPAD_ENTER,KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
+            if(confirmKey && (discoveryPlayback || discoveryConfirmHeld)) {
+                if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount==0 && discoveryPlayback) {
+                    discoveryConfirmHeld=true; confirmDiscovery()
+                }
+                if(event.action==KeyEvent.ACTION_UP) discoveryConfirmHeld=false
+                return true
+            }
+
             if(key in listOf(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,KeyEvent.KEYCODE_MEDIA_PLAY,KeyEvent.KEYCODE_MEDIA_PAUSE,KeyEvent.KEYCODE_MEDIA_NEXT,KeyEvent.KEYCODE_MEDIA_PREVIOUS,KeyEvent.KEYCODE_MEDIA_STOP,KeyEvent.KEYCODE_MEDIA_FAST_FORWARD,KeyEvent.KEYCODE_MEDIA_REWIND)) {
                 if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount==0) when(key) {
                     KeyEvent.KEYCODE_MEDIA_PLAY -> requestPlayback(true)
@@ -1283,7 +1327,7 @@ class MainActivity: Activity() {
                     return true
                 }
                 if(discoveryPlayback && key in listOf(KeyEvent.KEYCODE_DPAD_CENTER,KeyEvent.KEYCODE_ENTER)) {
-                    if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount==0) { discoveryPlayback=false; playEpisode(0) }
+                    if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount==0) confirmDiscovery()
                     return true
                 }
                 if(key in listOf(KeyEvent.KEYCODE_DPAD_LEFT,KeyEvent.KEYCODE_DPAD_RIGHT,KeyEvent.KEYCODE_DPAD_CENTER,KeyEvent.KEYCODE_ENTER,KeyEvent.KEYCODE_DPAD_UP,KeyEvent.KEYCODE_DPAD_DOWN,KeyEvent.KEYCODE_MENU)) {
