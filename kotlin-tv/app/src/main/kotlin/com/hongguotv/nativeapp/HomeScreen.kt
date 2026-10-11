@@ -42,7 +42,8 @@ class HomeScreen(
     private val remember: (String)->Unit,
     private val selectRecommendation: (String)->Unit = {},
     private val activeRecommendation: ()->String = { "all" },
-    private val loadMoreRecommendation: ()->Unit = {}
+    private val loadMoreRecommendation: ()->Unit = {},
+    private val startDiscovery: ()->Unit = {}
 ): LinearLayout(context) {
     data class Entry(val series: Series,val label: String,val resume: Boolean=false,val progress: Int?=null)
     data class Shelf(val key: String,val title: String,val entries: List<Entry>,val more: (() -> Unit)?=null)
@@ -82,7 +83,7 @@ class HomeScreen(
         return Position(key,rows.getOrNull(row)?.key,column.coerceAtLeast(0),row.coerceAtLeast(0),scroll.scrollY,rows.associate { it.key to it.horizontal.scrollX })
     }
 
-    /** Append newly loaded recommendations in place; rebuilding the waterfall loses focus and scroll. */
+    /** Append newly loaded recommendations in place; rebuilding the grid loses focus and scroll. */
     fun updateShelves(next: List<Shelf>,requestFocus: Boolean=hasFocus()) {
         val oldFeed=shelves.firstOrNull { it.key=="recommend-feed" }
         val nextFeed=next.firstOrNull { it.key=="recommend-feed" }
@@ -146,7 +147,16 @@ class HomeScreen(
             val heading=LinearLayout(context).apply { orientation=HORIZONTAL; gravity=Gravity.CENTER_VERTICAL; setPadding(dp(2),dp(4),dp(2),dp(9)) }
             heading.addView(View(context).apply { background=TvStyle.shape(context,accent,radius=2) },LayoutParams(dp(3),dp(14)).apply { rightMargin=dp(8) })
             heading.addView(label(shelf.title,20f).apply { setTypeface(null,Typeface.BOLD) },if(shelf.key=="recommend-feed") LayoutParams(-1,-2) else LayoutParams(0,-2,1f))
-            if(shelf.key!="recommend-feed") heading.addView(label("左右选剧  ·  上下切换分区",10f,TvStyle.muted))
+            if(shelf.key=="recommend-feed") {
+                heading.getChildAt(1).layoutParams=LayoutParams(0,-2,1f)
+                val discovery=label("随机刷剧  ·  OK 开始  ·  上下换剧",13f,TvStyle.text).apply {
+                    id=View.generateViewId(); tag="home:discovery"; isFocusable=true; isFocusableInTouchMode=true
+                    setPadding(dp(12),dp(9),dp(12),dp(9)); background=shape(false)
+                    setOnFocusChangeListener { v,f -> v.background=shape(f) }
+                    setOnClickListener { startDiscovery() }
+                }
+                heading.addView(discovery)
+            } else heading.addView(label("左右选剧  ·  上下切换分区",10f,TvStyle.muted))
             block.addView(heading)
             if(shelf.key=="recommend-feed") {
                 val filters=LinearLayout(context).apply { orientation=HORIZONTAL; gravity=Gravity.CENTER_VERTICAL; setPadding(0,dp(10),0,dp(12)) }
@@ -169,20 +179,15 @@ class HomeScreen(
                 recommendationBlock=block
             }
             val horizontal=HorizontalScrollView(context).apply { isHorizontalScrollBarEnabled=false; clipToPadding=false; setPadding(dp(2),dp(2),dp(2),dp(2)) }
-            val waterfall=shelf.key=="recommend-feed" || shelf.key.startsWith("recommend-")
-            val columns=LinearLayout(context).apply { orientation=HORIZONTAL; gravity=Gravity.TOP }
-            val waterfallColumns=List(6) { LinearLayout(context).apply { orientation=VERTICAL } }
+            val gridMode=shelf.key=="recommend-feed" || shelf.key.startsWith("recommend-")
+            val grid=GridLayout(context).apply { columnCount=6; orientation=GridLayout.HORIZONTAL; useDefaultMargins=false }
             val line=LinearLayout(context).apply { orientation=HORIZONTAL; gravity=Gravity.TOP }
-            if(waterfall) {
-                waterfallColumns.forEachIndexed { index,column -> columns.addView(column,LayoutParams(0,-2,1f).apply {
-                    if(index>0) leftMargin=dp(7)
-                }) }
-                block.addView(columns,LayoutParams(-1,-2))
-            } else { horizontal.addView(line); block.addView(horizontal) }
+            if(gridMode) { horizontal.addView(grid,LayoutParams(-1,-2)); block.addView(horizontal) }
+            else { horizontal.addView(line); block.addView(horizontal) }
             val rowCards=mutableListOf<Card>()
             lateinit var appendCard: (Entry?)->Unit
             fun addCard(entry: Entry?,moreAction: (() -> Unit)?=null) {
-                val width=if(waterfall) ((resources.displayMetrics.widthPixels*.9f-dp(48))/6).toInt().coerceAtLeast(dp(92)) else ((resources.displayMetrics.widthPixels*.9f-dp(70))/6).toInt().coerceAtLeast(dp(100))
+                val width=if(gridMode) ((resources.displayMetrics.widthPixels*.9f-dp(48))/6).toInt().coerceAtLeast(dp(92)) else ((resources.displayMetrics.widthPixels*.9f-dp(70))/6).toInt().coerceAtLeast(dp(100))
                 val key=if(entry!=null) "${shelf.key}:${entry.series.id}" else "${shelf.key}:more"
                 val view=LinearLayout(context).apply { orientation=VERTICAL; id=View.generateViewId(); tag=key; isFocusable=true; isFocusableInTouchMode=true; setPadding(dp(4),dp(4),dp(4),dp(8)); background=shape(false) }
                 val image=if(entry!=null) ImageView(context).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=IMPORTANT_FOR_ACCESSIBILITY_NO } else null
@@ -209,11 +214,14 @@ class HomeScreen(
                         lastRow=shelf.key
                     }
                 }
-                if(waterfall && entry!=null) {
-                    val column=waterfallColumns[rowCards.size%waterfallColumns.size]
-                    column.addView(view,LayoutParams(-1,-2).apply { bottomMargin=dp(12) })
-                    val imageHeight=dp(if(rowCards.size%6==0) 190 else if(rowCards.size%6==1) 236 else if(rowCards.size%6==2) 208 else if(rowCards.size%6==3) 252 else if(rowCards.size%6==4) 182 else 220)
-                    image?.layoutParams=LayoutParams(-1,imageHeight)
+                if(gridMode) {
+                    val index=rowCards.size
+                    val params=GridLayout.LayoutParams(GridLayout.spec(index/6),GridLayout.spec(index%6,1f)).apply {
+                        this.width=0; this.height=LayoutParams.WRAP_CONTENT
+                        leftMargin=dp(4); rightMargin=dp(4); topMargin=dp(3); bottomMargin=dp(9)
+                    }
+                    grid.addView(view,params)
+                    image?.layoutParams=LayoutParams(-1,((width-dp(8))/TvStyle.POSTER_ASPECT).toInt())
                 } else line.addView(view,LayoutParams(width,-1).apply { rightMargin=dp(14) })
                 rowCards+=card; cards[key]=card
             }

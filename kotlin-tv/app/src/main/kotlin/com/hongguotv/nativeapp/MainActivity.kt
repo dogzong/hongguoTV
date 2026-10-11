@@ -70,6 +70,11 @@ class MainActivity: Activity() {
     private var prefetchAttempts=0
     private var homeScreen: HomeScreen?=null
     private var homepageRecommendations=emptyList<RecommendationSection>()
+    private var homeNewReleases=emptyList<Series>()
+    private var discoveryQueue=emptyList<Series>()
+    private var discoveryIndex=0
+    private var discoveryPlayback=false
+    private val discoveryUnavailable=mutableSetOf<String>()
     private var activeRecommendationType="all"
     private val recommendationNextPage=mutableMapOf<String,Int>()
     private val recommendationLoading=mutableSetOf<String>()
@@ -425,12 +430,13 @@ class MainActivity: Activity() {
                 if(requestTab==0 && requestCollection==null && requestPage==1) library.cacheHome(requestType,result.items,result.hasMore)
                 if(requestTab==0 && requestCollection==null && requestPage==1 && (homeFromCache || tvTools.showing || updater.showing)) {
                     homepageRecommendations=result.recommendations
+                    homeNewReleases=result.newReleases
                     homeScreen?.updateShelves(homeShelves(),requestFocus=false)
                     homeScreen?.refresh?.text="热门已更新 · 按确认查看"
-                    homeScreen?.refresh?.setOnClickListener { catalog=result.items; hasMore=result.hasMore; ranking=result.ranking; homepageRecommendations=result.recommendations; showCatalog() }
+                    homeScreen?.refresh?.setOnClickListener { catalog=result.items; hasMore=result.hasMore; ranking=result.ranking; homepageRecommendations=result.recommendations; homeNewReleases=result.newReleases; showCatalog() }
                 } else {
                     catalog=result.items; hasMore=result.hasMore; ranking=result.ranking
-                    if(requestTab==0 && requestCollection==null && requestPage==1) homepageRecommendations=result.recommendations
+                    if(requestTab==0 && requestCollection==null && requestPage==1) { homepageRecommendations=result.recommendations; homeNewReleases=result.newReleases }
                     val keepNav=nav.any { it.hasFocus() }; val keepType=typeButtons.values.any { it.hasFocus() }
                     rankSubtitle?.text=ranking?.updatedText?.ifBlank { "来源：红果漫剧热播榜" } ?: "来源：红果漫剧热播榜"
                     body.removeAllViews(); catalogGrid(body,keepNav || focusNav,keepType || focusType)
@@ -597,7 +603,7 @@ class MainActivity: Activity() {
                 homeScreen?.scrollToRecommendation()
                 homeScreen?.focusRecommendation(type)
             },
-            { activeRecommendationType },{ loadMoreRecommendations() })
+            { activeRecommendationType },{ loadMoreRecommendations() },{ startDiscoveryPlayback() })
         homeScreen=home; body.addView(home,lp(-1,0).apply { weight=1f })
         val hot=catalog.filterNot { it.id in library.hidden() }
         home.render(homeShelves(),catalogFocus,!focusNav && !focusType,
@@ -630,8 +636,44 @@ class MainActivity: Activity() {
             HomeScreen.Shelf("updates","收藏有更新",updates.take(8).map { HomeScreen.Entry(it,library.favoriteLabel(it.id),true) },
                 if(updates.size>8) { { showCollection("updates") } } else null),
             HomeScreen.Shelf("later","稍后看",later.take(10).map { HomeScreen.Entry(it,"稍后看 · 长按管理") },
-                if(later.size>10) { { showCollection("later") } } else null)) +
+                if(later.size>10) { { showCollection("later") } } else null),
+            HomeScreen.Shelf("new-releases","新剧推荐",homeNewReleases.filterNot { it.id in hidden }.map { HomeScreen.Entry(it,it.badge.ifBlank { "新上架" }) })) +
             listOf(HomeScreen.Shelf("recommend-feed",recommendation?.title ?: "红果推荐",entries))
+    }
+    private fun startDiscoveryPlayback() {
+        val candidates=(catalog+homeNewReleases+homepageRecommendations.flatMap { it.items }).filterNot { it.id in library.hidden() }.distinctBy { it.id }
+        if(candidates.isEmpty()) { Toast.makeText(this,"推荐内容还在加载，请稍后刷新",Toast.LENGTH_SHORT).show(); return }
+        discoveryQueue=candidates.shuffled(); discoveryIndex=0; discoveryUnavailable.clear(); discoveryPlayback=true
+        openDiscoverySeries(discoveryQueue[discoveryIndex])
+    }
+    private fun openDiscoverySeries(series: Series) {
+        if(screen=="player") { saveProgress(); releasePlayer() }
+        pendingDetail=series; directPlayback=true; invalidatePage(); releaseCatalogViews(); screen="detail"; detail= null
+        val body=base("随机刷剧 · 上下切换 · OK 从头看")
+        message(body,"正在准备《${series.title}》…")
+        work({ repository.detail(series.id) },{ result ->
+            if(!discoveryPlayback) return@work
+            detail=result; episodeIndex=0; group=0
+            library.observeFavorite(series.id,result.episodes.size,System.currentTimeMillis(),acknowledge=true)
+            playEpisode(0)
+        },{ problem ->
+            if(!discoveryPlayback) return@work
+            android.util.Log.w("HongguoTV","Discovery item unavailable id=${series.id}",problem)
+            discoveryUnavailable+=series.id
+            skipDiscovery(1)
+        })
+    }
+    private fun skipDiscovery(direction: Int) {
+        if(discoveryQueue.isEmpty()) return
+        var checked=0
+        do {
+            discoveryIndex=(discoveryIndex+direction).mod(discoveryQueue.size)
+            checked++
+        } while(checked<discoveryQueue.size && discoveryQueue[discoveryIndex].id in discoveryUnavailable)
+        if(discoveryQueue[discoveryIndex].id in discoveryUnavailable) {
+            discoveryPlayback=false; Toast.makeText(this,"当前推荐暂时无法播放",Toast.LENGTH_SHORT).show(); showCatalog(); return
+        }
+        openDiscoverySeries(discoveryQueue[discoveryIndex])
     }
     private fun loadMoreRecommendations() {
         val type=activeRecommendationType
@@ -792,6 +834,7 @@ class MainActivity: Activity() {
         })
     }
     private fun openDetail(series: Series,resume: Boolean=false,autoplay: Boolean=true) {
+        discoveryPlayback=false
         pendingDetail=series; detailAutoplay=autoplay
         invalidatePage(); releaseCatalogViews(); screen="detail"; directPlayback=resume; detail=null; synopsisExpanded=false
         val body=base(series.title); message(body,"正在加载剧集…")
@@ -932,6 +975,7 @@ class MainActivity: Activity() {
                     if(state==Player.STATE_ENDED) {
                         saveProgress(true)
                         if(sleepTimer.episodeEnded()) stopForSleep()
+                        else if(discoveryPlayback && foreground && requestedAutoplay && !pausedForLifecycle) playEpisode(0)
                         else if(foreground && requestedAutoplay && !pausedForLifecycle && library.autoNext && episodeIndex<data.episodes.lastIndex) playEpisode(episodeIndex+1)
                         else { requestedAutoplay=false; p.pause(); playbackText.text="本集已结束"; showPanel() }
                     }
@@ -1032,7 +1076,7 @@ class MainActivity: Activity() {
         val p=player ?: return
         val duration=p.duration.coerceAtLeast(0); val position=pendingSeek ?: p.currentPosition
         val state=when { p.playbackState==Player.STATE_BUFFERING -> "缓冲中"; p.playbackState==Player.STATE_ENDED -> "本集已结束"; !p.playWhenReady -> "已暂停"; else -> "正在播放" }
-        playbackText.text="$state  ·  ${formatTime(position)} / ${formatTime(duration)}  ·  $quality  ·  ${PlaybackSpeed.label(p.playbackParameters.speed)}"+(if(sleepTimer.active) "  ·  定时 ${sleepTimer.label()}" else "")
+        playbackText.text=(if(discoveryPlayback) "推荐刷剧 · 上下换剧 · OK 从头看  ·  " else "")+"$state  ·  ${formatTime(position)} / ${formatTime(duration)}  ·  $quality  ·  ${PlaybackSpeed.label(p.playbackParameters.speed)}"+(if(sleepTimer.active) "  ·  定时 ${sleepTimer.label()}" else "")
         progressBar.progress=if(duration>0) (position*1000/duration).toInt().coerceIn(0,1000) else 0
     }
     private fun requestPlayback(play: Boolean) {
@@ -1202,6 +1246,7 @@ class MainActivity: Activity() {
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
     private fun returnToDetail(forceDetail: Boolean=false) {
+        discoveryPlayback=false
         sleepTimer.cancel(); sleepStopped=false; saveProgress(); library.flush(); invalidatePage(); releasePlayer()
         if(directPlayback && !forceDetail) showCatalog() else { directPlayback=false; showDetail(true) }
     }
@@ -1233,6 +1278,14 @@ class MainActivity: Activity() {
                 return true
             }
             if(!panel) {
+                if(discoveryPlayback && key in listOf(KeyEvent.KEYCODE_DPAD_UP,KeyEvent.KEYCODE_DPAD_DOWN)) {
+                    if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount==0) skipDiscovery(if(key==KeyEvent.KEYCODE_DPAD_DOWN) 1 else -1)
+                    return true
+                }
+                if(discoveryPlayback && key in listOf(KeyEvent.KEYCODE_DPAD_CENTER,KeyEvent.KEYCODE_ENTER)) {
+                    if(event.action==KeyEvent.ACTION_DOWN && event.repeatCount==0) { discoveryPlayback=false; playEpisode(0) }
+                    return true
+                }
                 if(key in listOf(KeyEvent.KEYCODE_DPAD_LEFT,KeyEvent.KEYCODE_DPAD_RIGHT,KeyEvent.KEYCODE_DPAD_CENTER,KeyEvent.KEYCODE_ENTER,KeyEvent.KEYCODE_DPAD_UP,KeyEvent.KEYCODE_DPAD_DOWN,KeyEvent.KEYCODE_MENU)) {
                     if(event.action==KeyEvent.ACTION_DOWN) when(key) {
                         KeyEvent.KEYCODE_DPAD_LEFT -> seek(-1,event.repeatCount)
