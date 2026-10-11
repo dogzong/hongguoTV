@@ -41,14 +41,14 @@ class HomeScreen(
     private val actions: (Series,View)->Unit,
     private val remember: (String)->Unit,
     private val selectRecommendation: (String)->Unit = {},
-    private val activeRecommendation: String = "all",
+    private val activeRecommendation: ()->String = { "all" },
     private val loadMoreRecommendation: ()->Unit = {}
 ): LinearLayout(context) {
     data class Entry(val series: Series,val label: String,val resume: Boolean=false,val progress: Int?=null)
     data class Shelf(val key: String,val title: String,val entries: List<Entry>,val more: (() -> Unit)?=null)
     data class Position(val focus: String,val shelf: String?,val column: Int,val row: Int,val vertical: Int,val horizontal: Map<String,Int>)
     private data class Card(val key: String,val view: LinearLayout,val image: ImageView?,val title: TextView,val label: TextView,val progress: ProgressBar?,var entry: Entry?,var pending: Boolean=false)
-    private data class Row(val key: String,val block: LinearLayout,val horizontal: HorizontalScrollView,val cards: List<Card>)
+    private data class Row(val key: String,val block: LinearLayout,val horizontal: HorizontalScrollView,val cards: MutableList<Card>)
     private val accent=TvStyle.accent
     private fun dp(n: Int)=(n*resources.displayMetrics.density).toInt()
     private fun shape(focus: Boolean)=TvStyle.card(context,focus)
@@ -64,6 +64,9 @@ class HomeScreen(
     private var lastRow: String?=null
     private var restoring=false
     private var revision=0
+    private var recommendationBlock: View?=null
+    private var appendRecommendation: ((Entry)->Unit)?=null
+    private val recommendationChips=linkedMapOf<String,View>()
     val refresh=label("正在更新热门…",13f).apply { id=View.generateViewId(); tag="home:refresh"; isFocusable=true; isFocusableInTouchMode=true; gravity=Gravity.CENTER_VERTICAL; setPadding(dp(12),dp(8),dp(12),dp(8)); background=shape(false); setOnFocusChangeListener { _,f -> background=shape(f); if(f) lastFocus=tag.toString() } }
     init {
         orientation=VERTICAL; scroll.addView(contents); addView(scroll,LayoutParams(-1,0,1f))
@@ -79,10 +82,38 @@ class HomeScreen(
         return Position(key,rows.getOrNull(row)?.key,column.coerceAtLeast(0),row.coerceAtLeast(0),scroll.scrollY,rows.associate { it.key to it.horizontal.scrollX })
     }
 
-    /** Rebuild only this bounded shelf area, preserving the old card or its nearest neighbour. */
+    /** Append newly loaded recommendations in place; rebuilding the waterfall loses focus and scroll. */
     fun updateShelves(next: List<Shelf>,requestFocus: Boolean=hasFocus()) {
+        val oldFeed=shelves.firstOrNull { it.key=="recommend-feed" }
+        val nextFeed=next.firstOrNull { it.key=="recommend-feed" }
+        fun shelfShape(items: List<Shelf>)=items.filterNot { it.key=="recommend-feed" }.map { Triple(it.key,it.title,it.entries) }
+        val otherShelvesUnchanged=shelfShape(shelves)==shelfShape(next)
+        if(oldFeed!=null && nextFeed!=null && otherShelvesUnchanged && nextFeed.entries.size>=oldFeed.entries.size &&
+            nextFeed.entries.take(oldFeed.entries.size)==oldFeed.entries && nextFeed.title==oldFeed.title) {
+            shelves=next
+            nextFeed.entries.drop(oldFeed.entries.size).forEach { appendRecommendation?.invoke(it) }
+            return
+        }
         val position=capturePosition()
         render(next,position.focus,requestFocus,footerMore,position)
+    }
+
+    fun scrollToRecommendation() {
+        recommendationBlock?.let { block ->
+            post {
+                if(block.isLaidOut) scroll.smoothScrollTo(0,block.top.coerceAtLeast(0))
+                else block.addOnLayoutChangeListener(object: View.OnLayoutChangeListener {
+                    override fun onLayoutChange(v: View,left: Int,top: Int,right: Int,bottom: Int,oldLeft: Int,oldTop: Int,oldRight: Int,oldBottom: Int) {
+                        block.removeOnLayoutChangeListener(this)
+                        scroll.smoothScrollTo(0,block.top.coerceAtLeast(0))
+                    }
+                })
+            }
+        }
+    }
+
+    fun focusRecommendation(type: String) {
+        recommendationChips[type]?.requestFocus()
     }
 
     /** Update an existing card without replacing views or moving focus. Structural changes use updateShelves. */
@@ -109,22 +140,34 @@ class HomeScreen(
         val previous=position ?: if(rows.isNotEmpty()) capturePosition() else null
         this.shelves=shelves; footerMore=more; revision++; val ticket=revision; restoring=true
         contents.removeAllViews(); rows.clear(); cards.clear(); moreButton=null; lastRow=null
+        recommendationBlock=null; appendRecommendation=null; recommendationChips.clear()
         shelves.filter { it.entries.isNotEmpty() || it.more!=null }.forEach { shelf ->
             val block=LinearLayout(context).apply { orientation=VERTICAL }
             val heading=LinearLayout(context).apply { orientation=HORIZONTAL; gravity=Gravity.CENTER_VERTICAL; setPadding(dp(2),dp(4),dp(2),dp(9)) }
             heading.addView(View(context).apply { background=TvStyle.shape(context,accent,radius=2) },LayoutParams(dp(3),dp(14)).apply { rightMargin=dp(8) })
-            heading.addView(label(shelf.title,16f).apply { setTypeface(null,Typeface.BOLD) },LayoutParams(0,-2,1f))
+            heading.addView(label(shelf.title,20f).apply { setTypeface(null,Typeface.BOLD) },if(shelf.key=="recommend-feed") LayoutParams(-1,-2) else LayoutParams(0,-2,1f))
+            if(shelf.key!="recommend-feed") heading.addView(label("左右选剧  ·  上下切换分区",10f,TvStyle.muted))
+            block.addView(heading)
             if(shelf.key=="recommend-feed") {
-                listOf("all" to "短剧","human" to "真人剧","comic" to "漫剧","ai" to "AI剧").forEach { (type,name) ->
-                    val chip=label(name,12f,if(type==activeRecommendation) TvStyle.accent else TvStyle.muted).apply {
-                        isFocusable=true; isFocusableInTouchMode=true; setPadding(dp(8),dp(5),dp(8),dp(5)); background=shape(type==activeRecommendation)
-                        setOnFocusChangeListener { v,f -> v.background=shape(f || type==activeRecommendation) }
+                val filters=LinearLayout(context).apply { orientation=HORIZONTAL; gravity=Gravity.CENTER_VERTICAL; setPadding(0,dp(10),0,dp(12)) }
+                listOf("all" to "短剧推荐","human" to "真人剧","comic" to "漫剧","ai" to "AI剧").forEach { (type,name) ->
+                    val chip=TextView(context).apply {
+                        id=View.generateViewId(); text=name; textSize=17f; includeFontPadding=false; gravity=Gravity.CENTER
+                        setTextColor(if(type==activeRecommendation()) TvStyle.text else TvStyle.muted)
+                        isFocusable=true; isFocusableInTouchMode=true; minHeight=dp(48); setPadding(dp(14),dp(10),dp(14),dp(10))
+                        background=TvStyle.card(context,type==activeRecommendation())
+                        setOnFocusChangeListener { v,f ->
+                            if(type==activeRecommendation() || f) v.background=TvStyle.card(context,true)
+                            else v.background=TvStyle.card(context,false)
+                        }
                         setOnClickListener { selectRecommendation(type) }
                     }
-                    heading.addView(chip,LayoutParams(-2,-2).apply { leftMargin=dp(4) })
+                    filters.addView(chip,LayoutParams(0,-2,1f).apply { if(type!="all") leftMargin=dp(8) })
+                    recommendationChips[type]=chip
                 }
-            } else heading.addView(label("左右选剧  ·  上下切换分区",10f,TvStyle.muted))
-            block.addView(heading)
+                block.addView(filters)
+                recommendationBlock=block
+            }
             val horizontal=HorizontalScrollView(context).apply { isHorizontalScrollBarEnabled=false; clipToPadding=false; setPadding(dp(2),dp(2),dp(2),dp(2)) }
             val waterfall=shelf.key=="recommend-feed" || shelf.key.startsWith("recommend-")
             val columns=LinearLayout(context).apply { orientation=HORIZONTAL; gravity=Gravity.TOP }
@@ -137,6 +180,7 @@ class HomeScreen(
                 block.addView(columns,LayoutParams(-1,-2))
             } else { horizontal.addView(line); block.addView(horizontal) }
             val rowCards=mutableListOf<Card>()
+            lateinit var appendCard: (Entry?)->Unit
             fun addCard(entry: Entry?,moreAction: (() -> Unit)?=null) {
                 val width=if(waterfall) ((resources.displayMetrics.widthPixels*.9f-dp(48))/6).toInt().coerceAtLeast(dp(92)) else ((resources.displayMetrics.widthPixels*.9f-dp(70))/6).toInt().coerceAtLeast(dp(100))
                 val key=if(entry!=null) "${shelf.key}:${entry.series.id}" else "${shelf.key}:more"
@@ -173,7 +217,13 @@ class HomeScreen(
                 } else line.addView(view,LayoutParams(width,-1).apply { rightMargin=dp(14) })
                 rowCards+=card; cards[key]=card
             }
+            appendCard={ entry -> addCard(entry) }
             shelf.entries.forEach { addCard(it) }
+            if(shelf.key=="recommend-feed") appendRecommendation={ entry ->
+                appendCard(entry)
+                bindCardFocus(top)
+                loadFeedNearViewport()
+            }
             shelf.more?.let { action -> addCard(null,action) }
             contents.addView(block,LayoutParams(-1,-2).apply { bottomMargin=dp(16) }); rows+=Row(shelf.key,block,horizontal,rowCards)
         }
@@ -184,11 +234,7 @@ class HomeScreen(
             val next=label("更多热门  ›",15f).apply { id=View.generateViewId(); tag="home:more"; isFocusable=true; isFocusableInTouchMode=true; setPadding(dp(12),dp(12),dp(12),dp(12)); background=shape(false); setOnFocusChangeListener { _,f -> background=shape(f); if(f) lastFocus=tag.toString() }; setOnClickListener { more() } }
             contents.addView(next,LayoutParams(-1,-2).apply { topMargin=dp(8) }); footer+=next; moreButton=next
         }
-        rows.forEachIndexed { i,row -> row.cards.forEachIndexed { j,card ->
-            card.view.nextFocusLeftId=row.cards[(j-1).coerceAtLeast(0)].view.id; card.view.nextFocusRightId=row.cards[(j+1).coerceAtMost(row.cards.lastIndex)].view.id
-            card.view.nextFocusUpId=if(i==0) top.id else rows[i-1].cards[j.coerceAtMost(rows[i-1].cards.lastIndex)].view.id
-            card.view.nextFocusDownId=if(i==rows.lastIndex) refresh.id else rows[i+1].cards[j.coerceAtMost(rows[i+1].cards.lastIndex)].view.id
-        } }
+        bindCardFocus(top)
         footer.forEachIndexed { i,v -> v.nextFocusUpId=if(i==0) rows.lastOrNull()?.cards?.firstOrNull()?.view?.id ?: top.id else footer[i-1].id; v.nextFocusDownId=footer.getOrNull(i+1)?.id ?: v.id }
         top.nextFocusDownId=firstId()
         val preferred=focus.ifBlank { previous?.focus.orEmpty() }
@@ -204,6 +250,46 @@ class HomeScreen(
                 if(requestFocus && previous==null) rows.firstOrNull { row -> row.cards.any { it.view===target } }?.let { revealSelection(it) }
                 loadNearbySelection()
             }
+        }
+    }
+
+    private fun bindCardFocus(top: View) {
+        rows.forEachIndexed { i,row -> row.cards.forEachIndexed { j,card ->
+            if(row.key=="recommend-feed") {
+                val col=j%6
+                val indexInColumn=j/6
+                val sameColumnBefore=j-6
+                val sameColumnAfter=j+6
+                card.view.nextFocusLeftId=row.cards.getOrNull(if(col>0) j-1 else j)?.view?.id ?: card.view.id
+                card.view.nextFocusRightId=row.cards.getOrNull(if(col<5) j+1 else j)?.view?.id ?: card.view.id
+                card.view.nextFocusUpId=when {
+                    indexInColumn>0 -> row.cards.getOrNull(sameColumnBefore)?.view?.id ?: top.id
+                    else -> recommendationChips[activeRecommendation()]?.id ?: top.id
+                }
+                card.view.nextFocusDownId=when {
+                    row.cards.getOrNull(sameColumnAfter)!=null -> row.cards[sameColumnAfter].view.id
+                    row.cards.getOrNull(j+1)!=null -> row.cards[j+1].view.id
+                    else -> refresh.id
+                }
+            } else {
+                card.view.nextFocusLeftId=row.cards[(j-1).coerceAtLeast(0)].view.id
+                card.view.nextFocusRightId=row.cards[(j+1).coerceAtMost(row.cards.lastIndex)].view.id
+                card.view.nextFocusUpId=if(i==0) top.id else rows[i-1].cards[j.coerceAtMost(rows[i-1].cards.lastIndex)].view.id
+                card.view.nextFocusDownId=if(i==rows.lastIndex) refresh.id else rows[i+1].cards[j.coerceAtMost(rows[i+1].cards.lastIndex)].view.id
+            }
+        } }
+    }
+
+    private fun loadFeedNearViewport() {
+        post {
+            val feed=rows.firstOrNull { it.key=="recommend-feed" } ?: return@post
+            val visible=feed.cards.indices.filter { index ->
+                val rect=android.graphics.Rect()
+                feed.cards[index].view.getGlobalVisibleRect(rect)
+            }
+            visible.forEach { requestCover(feed.cards[it]) }
+            val last=visible.maxOrNull() ?: return@post
+            for(index in last+1..(last+6).coerceAtMost(feed.cards.lastIndex)) requestCover(feed.cards[index])
         }
     }
 

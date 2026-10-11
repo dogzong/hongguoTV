@@ -31,8 +31,9 @@ class ArtworkLoader(context: Context) {
         const val PRIORITY_FOCUSED = 0
         const val PRIORITY_VISIBLE = 1
         const val PRIORITY_PREFETCH = 2
-        private const val MAX_PENDING = 24
+        private const val MAX_PENDING = 36
         private const val MAX_BYTES = 4 * 1024 * 1024
+        private const val CACHE_TTL_MS = 60 * 60 * 1000L
     }
 
     private data class Key(val url: String, val width: Int, val height: Int)
@@ -54,14 +55,15 @@ class ArtworkLoader(context: Context) {
     private val main = Handler(Looper.getMainLooper())
     private val lowRam = context.applicationContext.getSystemService(ActivityManager::class.java)?.isLowRamDevice == true
     private val cacheBytes = (if (lowRam) 4 else 8) * 1024 * 1024
-    private val cache = object : LruCache<Key, Bitmap>(cacheBytes) {
-        override fun sizeOf(key: Key, value: Bitmap) = value.allocationByteCount
+    private data class CachedBitmap(val bitmap: Bitmap,val savedAt: Long)
+    private val cache = object : LruCache<Key, CachedBitmap>(cacheBytes) {
+        override fun sizeOf(key: Key, value: CachedBitmap) = value.bitmap.allocationByteCount
     }
     private val disk = ArtworkCache(File(context.applicationContext.cacheDir, "artwork-v1"))
     // This client owns its dispatcher and pool; cancelling artwork never cancels video or catalog calls.
     private val http = OkHttpClient.Builder().connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(8, TimeUnit.SECONDS).callTimeout(12, TimeUnit.SECONDS).build()
-    private val workers = Executors.newFixedThreadPool(if (lowRam) 1 else 2) { runnable ->
+    private val workers = Executors.newFixedThreadPool(if (lowRam) 1 else 3) { runnable ->
         Thread(runnable, "hongguotv-artwork").apply { priority = Thread.NORM_PRIORITY - 1 }
     }
     private val signal = Object()
@@ -72,7 +74,13 @@ class ArtworkLoader(context: Context) {
     private var order = 0L
     @Volatile private var closed = false
 
-    init { repeat(if (lowRam) 1 else 2) { workers.execute(::work) } }
+    init { repeat(if (lowRam) 1 else 3) { workers.execute(::work) } }
+
+    private fun cached(key: Key): Bitmap? {
+        val item=cache.get(key) ?: return null
+        if(System.currentTimeMillis()-item.savedAt !in 0..CACHE_TTL_MS) { cache.remove(key); return null }
+        return item.bitmap
+    }
 
     /** Size defaults to the laid-out content bounds, including the detail page's portrait artwork. */
     fun load(view: ImageView, url: String, priority: Int = PRIORITY_VISIBLE, widthPx: Int = 0, heightPx: Int = 0) {
@@ -110,7 +118,7 @@ class ArtworkLoader(context: Context) {
         val key = Key(binding.url, max(1, (width * scale).toInt()), max(1, (height * scale).toInt()))
         if (binding.key != key) { detachJob(binding); binding.key = key; binding.failed = null }
         if (binding.applied == key || binding.failed == key) return
-        cache.get(key)?.let { bitmap -> view.setImageBitmap(bitmap); binding.applied = key; return }
+        cached(key)?.let { bitmap -> view.setImageBitmap(bitmap); binding.applied = key; return }
         var cancelled: Job? = null
         synchronized(signal) {
             jobs[key]?.let { job ->
@@ -210,11 +218,11 @@ class ArtworkLoader(context: Context) {
                 }
             } catch (_: InterruptedException) { return } ?: return
             val bitmap = try {
-                if (job.cancelled) null else cache.get(job.key) ?: fetch(job)
+                if (job.cancelled) null else cached(job.key) ?: fetch(job)
             } catch (_: Exception) { null } catch (_: OutOfMemoryError) { cache.evictAll(); null }
             val listeners = synchronized(signal) {
                 if (jobs[job.key] === job) jobs.remove(job.key)
-                if (!job.cancelled && !closed && bitmap != null) cache.put(job.key, bitmap)
+                if (!job.cancelled && !closed && bitmap != null) cache.put(job.key, CachedBitmap(bitmap,System.currentTimeMillis()))
                 job.listeners.toList().also { job.listeners.clear() }
             }
             if (!job.cancelled && !closed) main.post {

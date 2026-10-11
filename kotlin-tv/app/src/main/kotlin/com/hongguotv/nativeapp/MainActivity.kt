@@ -589,8 +589,15 @@ class MainActivity: Activity() {
         val top=if(inlineHomeFilters()) nav[0] else typeButtons.getValue(library.contentType)
         val home=HomeScreen(this,top,::loadCover,{ item,label -> preview.show(item,if(label.startsWith("第 ")) selectionStatus(item) else listOf(label,selectionStatus(item)).filter { it.isNotBlank() }.joinToString(" · ")) },
             { item,resume -> openDetail(item,resume) },::quickActions,{ catalogFocus=it },
-            { type -> activeRecommendationType=type; recommendationNextPage[type]=1; recommendationLoading.remove(type); homeScreen?.updateShelves(homeShelves(),requestFocus=false) },
-            activeRecommendationType,{ loadMoreRecommendations() })
+            { type ->
+                activeRecommendationType=type
+                recommendationNextPage[type]=1
+                recommendationLoading.remove(type)
+                homeScreen?.updateShelves(homeShelves(),requestFocus=false)
+                homeScreen?.scrollToRecommendation()
+                homeScreen?.focusRecommendation(type)
+            },
+            { activeRecommendationType },{ loadMoreRecommendations() })
         homeScreen=home; body.addView(home,lp(-1,0).apply { weight=1f })
         val hot=catalog.filterNot { it.id in library.hidden() }
         home.render(homeShelves(),catalogFocus,!focusNav && !focusType,
