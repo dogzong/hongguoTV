@@ -29,11 +29,11 @@ internal object ComicRank {
                         }
                 } else null
                 val payload=when(raw) { is JSONObject -> raw; is String -> JSONObject(raw); else -> continue }
-                if(!payload.optBoolean("isSuccess")) throw IOException("$label榜单暂不可用")
-                val rows=payload.optJSONArray("rankList") ?: throw IOException("$label榜单格式已变化")
-                val pagination=payload.optJSONObject("pagination") ?: throw IOException("$label分页信息缺失")
+                if(!payload.optBoolean("isSuccess")) throw IOException("${label}榜单暂不可用")
+                val rows=payload.optJSONArray("rankList") ?: throw IOException("${label}榜单格式已变化")
+                val pagination=payload.optJSONObject("pagination") ?: throw IOException("${label}分页信息缺失")
                 val totalPages=pagination.optInt("totalPages",0)
-                if(totalPages<1 || pagination.optInt("pageNum",page)!=page) throw IOException("$label分页信息异常")
+                if(totalPages<1 || pagination.optInt("pageNum",page)!=page) throw IOException("${label}分页信息异常")
                 val positions=linkedMapOf<String,RankPosition>()
                 val items=rows.objects().map { row ->
                     val count=row.optInt("episodeCount",row.optJSONArray("episodeVids")?.length() ?: 0)
@@ -48,14 +48,14 @@ internal object ComicRank {
                     ComicRanking(positions.filterKeys { id -> items.any { it.id==id } },minOf(totalPages,100),updatedText))
             }
             return renderedPage(document,html,page,slug,rankKey,label)
-        } catch(e: IOException) { throw e } catch(e: Exception) { throw IOException("$label榜单格式已变化",e) }
+        } catch(e: IOException) { throw e } catch(e: Exception) { throw IOException("${label}榜单格式已变化",e) }
     }
 
     private fun renderedPage(document: Document, html: String, page: Int,slug: String,rankKey: String,label: String): CatalogPage {
         // Some responses contain rendered cards while the deferred JSON is still unresolved.
         val route=ContentRepository.extractRouter(html).optJSONObject("loaderData")
-            ?.optJSONObject("rank_$slug/page") ?: throw IOException("页面没有$label榜单数据")
-        if(route.str("rankKey")!=rankKey || route.optInt("pageNum")!=page) throw IOException("$label分页信息异常")
+            ?.optJSONObject("rank_$slug/page") ?: throw IOException("页面没有${label}榜单数据")
+        if(route.str("rankKey")!=rankKey || route.optInt("pageNum")!=page) throw IOException("${label}分页信息异常")
         val positions=linkedMapOf<String,RankPosition>()
         val items=document.select("article[aria-labelledby^=rank-title-]").mapNotNull { article ->
             val heading=article.attr("aria-labelledby")
@@ -70,9 +70,9 @@ internal object ComicRank {
                 article.selectFirst("p[class*=metrics-]")?.text().orEmpty(),
                 article.select("p[class*=categories-] > span").take(5).joinToString(" · ") { it.text() })
         }.distinctBy { it.id }
-        if(items.isEmpty()) throw IOException("页面没有$label榜单数据")
+        if(items.isEmpty()) throw IOException("页面没有${label}榜单数据")
         val paging=document.selectFirst("nav[aria-label=榜单分页]") ?: throw IOException("漫剧分页信息缺失")
-        if(paging.selectFirst("[aria-current=page]")?.text()?.toIntOrNull()!=page) throw IOException("$label分页信息异常")
+        if(paging.selectFirst("[aria-current=page]")?.text()?.toIntOrNull()!=page) throw IOException("${label}分页信息异常")
         val lastPage=maxOf(page,paging.select("a[href]").mapNotNull { it.attr("href").substringAfter("?page=","").substringBefore('&').toIntOrNull() }.maxOrNull() ?: page)
         return CatalogPage(items,page<minOf(lastPage,100),ComicRanking(positions,minOf(lastPage,100),route.str("updatedText")))
     }
