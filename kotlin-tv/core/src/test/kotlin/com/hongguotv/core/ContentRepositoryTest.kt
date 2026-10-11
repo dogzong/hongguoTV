@@ -234,14 +234,36 @@ class ContentRepositoryTest {
         assertEquals(1,requests)
     }
 
-    @Test fun shortSearchKeepsWebsiteFallback() {
+    @Test fun shortSearchPrefersWebsite() {
+        val paths=mutableListOf<String>()
+        val repo=repository { request ->
+            paths+=request.url.encodedPath
+            """<script>_ROUTER_DATA={"loaderData":{"search_page":{"searchList":[{"series_id":"456","series_name":"测试短剧"}]}}}};</script>"""
+        }
+        assertEquals("456",repo.search("短剧",1,ContentType.SHORT).items.single().id)
+        assertEquals(listOf("/search/%E7%9F%AD%E5%89%A7"),paths)
+    }
+
+    @Test fun shortSearchFallsBackToAppWhenWebsiteFails() {
         val paths=mutableListOf<String>()
         val repo=repository { request ->
             paths+=request.url.encodedPath
             if(paths.size==1) throw IOException("offline")
-            """<script>_ROUTER_DATA={"loaderData":{"search_page":{"searchList":[{"series_id":"456","series_name":"测试短剧"}]}}}};</script>"""
+            JSONObject().put("code",0).put("search_tabs",JSONArray().put(searchTab(11,"456"))).toString()
         }
         assertEquals("456",repo.search("短剧",1,ContentType.SHORT).items.single().id)
+        assertEquals("/reading/bookapi/search/tab/v",paths.last())
         assertEquals(2,paths.size)
+    }
+
+    @Test fun newReleasePageUsesLatestSortAndRealPagination() {
+        val repo=repository { request ->
+            assertEquals("2",request.url.queryParameter("sort_type"))
+            assertEquals("2",request.url.queryParameter("page"))
+            """<script>_ROUTER_DATA={"loaderData":{"category_page":{"recommendList":[{"series_id":"456","series_name":"新剧"}],"pagination":{"totalPages":2}}}};</script>"""
+        }
+        val result=repo.newReleasePage(2)
+        assertEquals("456",result.items.single().id)
+        assertFalse(result.hasMore)
     }
 }

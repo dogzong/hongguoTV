@@ -437,6 +437,7 @@ class MainActivity: Activity() {
                     homepageRecommendations=result.recommendations
                     homeNewReleases=result.newReleases
                     homeScreen?.updateShelves(homeShelves(),requestFocus=false)
+                    main.post { loadMoreRecommendations() }
                     homeScreen?.refresh?.text="热门已更新 · 按确认查看"
                     homeScreen?.refresh?.setOnClickListener { catalog=result.items; hasMore=result.hasMore; ranking=result.ranking; homepageRecommendations=result.recommendations; homeNewReleases=result.newReleases; showCatalog() }
                 } else {
@@ -611,7 +612,7 @@ class MainActivity: Activity() {
         homeScreen=home; body.addView(home,lp(-1,0).apply { weight=1f })
         val hot=catalog.filterNot { it.id in library.hidden() }
         home.render(homeShelves(),catalogFocus,!focusNav && !focusType,
-            if(hasMore) { { page=2; catalogFocus=""; showCatalog(true) } } else null,homePosition)
+            null,homePosition)
         home.refresh.text=if(loading) if(homeFromCache) "已显示上次内容 · 正在更新热门…" else "正在更新热门…" else "刷新热门"
         home.refresh.setOnClickListener { showCatalog(true) }
         if(!loading) home.post { if(homeScreen===home) loadMoreRecommendations() }
