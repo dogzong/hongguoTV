@@ -292,26 +292,49 @@ class ContentRepositoryTest {
         assertEquals(1,requests)
     }
 
-    @Test fun shortSearchPrefersWebsite() {
-        val paths=mutableListOf<String>()
+    @Test fun shortSearchUsesRegisteredAppIdentity() {
         val repo=repository { request ->
-            paths+=request.url.encodedPath
-            """<script>_ROUTER_DATA={"loaderData":{"search_page":{"searchList":[{"series_id":"456","series_name":"测试短剧"}]}}}};</script>"""
+            assertEquals("/reading/bookapi/search/tab/v",request.url.encodedPath)
+            assertEquals("1234567890123456",request.url.queryParameter("device_id"))
+            assertEquals("2345678901234567",request.url.queryParameter("iid"))
+            assertEquals("11",request.url.queryParameter("tab_type"))
+            JSONObject().put("code",0).put("search_tabs",JSONArray().put(searchTab(11,"456"))).toString()
         }
         assertEquals("456",repo.search("短剧",1,ContentType.SHORT).items.single().id)
-        assertEquals(listOf("/search/%E7%9F%AD%E5%89%A7"),paths)
     }
 
-    @Test fun shortSearchFallsBackToAppWhenWebsiteFails() {
+    @Test fun shortSearchFallsBackToWebsiteWhenAppFails() {
         val paths=mutableListOf<String>()
         val repo=repository { request ->
             paths+=request.url.encodedPath
             if(paths.size==1) throw IOException("offline")
-            JSONObject().put("code",0).put("search_tabs",JSONArray().put(searchTab(11,"456"))).toString()
+            """<script>_ROUTER_DATA={"loaderData":{"search_page":{"searchList":[{"series_id":"456","series_name":"测试短剧"}]}}};</script>"""
         }
         assertEquals("456",repo.search("短剧",1,ContentType.SHORT).items.single().id)
-        assertEquals("/reading/bookapi/search/tab/v",paths.last())
-        assertEquals(2,paths.size)
+        assertEquals(listOf("/reading/bookapi/search/tab/v","/search/%E7%9F%AD%E5%89%A7"),paths)
+    }
+
+    @Test fun searchReregistersOnEmptyFirstResponseAndRetainsPaginationIdentity() {
+        var registrations=0; var searches=0
+        val client=OkHttpClient.Builder().addInterceptor { chain ->
+            val req=chain.request()
+            val response=if(req.url.host=="log.snssdk.com") {
+                registrations++; """{"device_id_str":"123456789012345$registrations","install_id_str":"234567890123456$registrations"}"""
+            } else {
+                searches++
+                if(searches==1) "" else JSONObject().put("code",0).put("search_tabs",JSONArray().put(searchTab(19,"999")
+                    .put("search_id","session").put("passback","cursor").put("next_offset",25))).toString()
+            }
+            Response.Builder().request(req).protocol(Protocol.HTTP_1_1).code(200).message("OK").body(response.toResponseBody()).build()
+        }.build()
+        val identity=PlaybackIdentity(); val repo=ContentRepository(client,playbackIdentity=identity)
+        assertEquals("999",repo.search("修仙",1,ContentType.COMIC).items.single().id)
+        assertEquals(2,registrations); assertEquals(2,searches)
+        repo.search("修仙",2,ContentType.COMIC)
+        assertEquals(2,registrations); assertEquals(3,searches)
+        identity.invalidate(PlaybackIdentity.Device("1234567890123452","2345678901234562"))
+        assertThrows(SearchSessionExpiredException::class.java) { repo.search("修仙",3,ContentType.COMIC) }
+        assertEquals(3,registrations); assertEquals(3,searches)
     }
 
     @Test fun newReleasePageUsesLatestSortAndRealPagination() {

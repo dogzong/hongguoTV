@@ -29,7 +29,7 @@ class SearchSessionExpiredException: IOException("搜索结果已过期，请从
 class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis, private val playbackIdentity: PlaybackIdentity = PlaybackIdentity()) {
     private val signer = Signer()
     private val site = "https://hongguoduanju.com"
-    private data class SearchCursor(val searchId: String, val passback: String, val offset: Int?, val updatedAt: Long)
+    private data class SearchCursor(val searchId: String, val passback: String, val offset: Int?, val updatedAt: Long, val deviceId: String)
     private val searchCursors=linkedMapOf<Triple<ContentType,String,Int>,SearchCursor>()
     private fun text(url: String, signed: Signer.Request? = null): String {
         val request = Request.Builder().url(url).header("User-Agent",VendorConstants.VIDEO_UA).header("Accept-Language","zh-CN,zh;q=0.9")
@@ -108,42 +108,69 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     fun search(keyword: String, page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(keyword.isNotBlank() && keyword.length<=80 && page in 1..100)
-        // The website search does not constrain content type. Never use it for comics.
-        if(type==ContentType.COMIC) return appSearch(keyword,page,type)
-        // The public site search is stable and carries the full result count. Use it first;
-        // the app's private signed endpoint remains a fallback when the site is unavailable.
-        try {
-            val data=router("$site/search/${Signer.encode(keyword)}?page=$page")
-            val section=data.optJSONObject("search_(keyword)/page") ?: data.optJSONObject("search_page") ?: throw IOException("搜索数据暂不可用")
-            val rows=section.optJSONArray("searchList") ?: throw IOException("搜索数据结构已变化")
-            val items=valid(rows.objects().map(::card))
-            val total=section.optInt("totalCount",0)
-            return CatalogPage(items,items.isNotEmpty() && (total==0 || page*items.size<total))
-        } catch (e: Exception) { /* Fall back to the signed app search below. */ }
-        val result=appSearch(keyword,page,type)
-        if(result.items.isNotEmpty() || !result.hasMore) return result
-        throw IOException("没有找到相关内容")
+        // The old website search URL currently serves a shell without search data.
+        // The registered app endpoint supports both short dramas and comics.
+        try { return appSearch(keyword,page,type) }
+        catch(e: SearchSessionExpiredException) { throw e }
+        catch(e: java.io.InterruptedIOException) { throw e }
+        catch(e: Exception) {
+            if(type==ContentType.COMIC || page>1) throw e
+            try {
+                val data=router("$site/search/${Signer.encode(keyword)}?page=$page")
+                val section=data.optJSONObject("search_(keyword)/page") ?: data.optJSONObject("search_page") ?: throw IOException("搜索数据暂不可用")
+                val rows=section.optJSONArray("searchList") ?: throw IOException("搜索数据结构已变化")
+                val items=valid(rows.objects().map(::card)); val total=section.optInt("totalCount",0)
+                return CatalogPage(items,items.isNotEmpty() && (total==0 || page*items.size<total))
+            } catch(fallback: Exception) {
+                if(fallback is java.io.InterruptedIOException) throw fallback
+                throw IOException("搜索暂不可用，请稍后重试",e)
+            }
+        }
     }
     private fun appSearch(keyword: String, page: Int, type: ContentType): CatalogPage {
-        val values=VendorConstants.device.toMutableMap()
-        for(k in listOf("version_code","manifest_version_code","update_version_code","pv_player")) values[k]="72232"
-        values["version_name"]="7.2.2.32"
-        values.putAll(linkedMapOf("query" to keyword,"count" to "20","offset" to ((page-1)*20).toString(),"tab_type" to type.searchTab.toString(),"bookshelf_search_plan" to "4","use_correct" to "true","user_is_login" to "0"))
         val cursor=synchronized(searchCursors) {
             val now=clock()
             searchCursors.entries.removeAll { now-it.value.updatedAt>300000 || (page==1 && it.key.first==type && it.key.second==keyword) }
             searchCursors[Triple(type,keyword,page-1)]
         }
-        if(type==ContentType.COMIC && page>1 && cursor==null) throw SearchSessionExpiredException()
-        cursor?.let {
-            if(it.searchId.isNotBlank()) values["search_id"]=it.searchId
-            if(it.passback.isNotBlank()) values["passback"]=it.passback
-            it.offset?.takeIf { offset -> offset>=0 }?.let { offset -> values["offset"]=offset.toString() }
+        if(page>1 && cursor==null) throw SearchSessionExpiredException()
+        var data: JSONObject?=null
+        var activeDevice: PlaybackIdentity.Device?=null
+        var lastFailure: IOException?=null
+        for(attempt in 0..1) {
+            val identity=playbackIdentity.get(http)
+            if(cursor!=null && cursor.deviceId!=identity.deviceId) throw SearchSessionExpiredException()
+            val values=VendorConstants.device.toMutableMap()
+            values["device_id"]=identity.deviceId; values["iid"]=identity.installId
+            for(k in listOf("version_code","manifest_version_code","update_version_code","pv_player")) values[k]="72232"
+            values["version_name"]="7.2.2.32"
+            values.putAll(linkedMapOf("query" to keyword,"count" to "20","offset" to ((page-1)*20).toString(),"tab_type" to type.searchTab.toString(),"bookshelf_search_plan" to "4","use_correct" to "true","user_is_login" to "0"))
+            cursor?.let {
+                if(it.searchId.isNotBlank()) values["search_id"]=it.searchId
+                if(it.passback.isNotBlank()) values["passback"]=it.passback
+                it.offset?.takeIf { offset -> offset>=0 }?.let { offset -> values["offset"]=offset.toString() }
+            }
+            val signed=signer.sign("https://api5-normal-sinfonlinea.fqnovel.com/reading/bookapi/search/tab/v",values)
+            val raw=text(signed.url,signed)
+            if(raw.isBlank()) {
+                playbackIdentity.invalidate(identity)
+                if(page>1) throw SearchSessionExpiredException()
+                lastFailure=IOException("搜索接口返回空内容")
+                continue
+            }
+            val response=try { JSONObject(raw) } catch(e: Exception) { throw IOException("搜索接口返回格式异常",e) }
+            val code=response.optInt("code",-1)
+            if(code==101000) {
+                playbackIdentity.invalidate(identity)
+                if(page>1) throw SearchSessionExpiredException()
+                lastFailure=IOException("搜索设备身份已失效（$code）")
+                continue
+            }
+            if(code!=0) throw IOException("搜索接口暂不可用（$code）")
+            data=response; activeDevice=identity; break
         }
-        val signed=signer.sign("https://api5-normal-sinfonlinea.fqnovel.com/reading/bookapi/search/tab/v",values)
-        val data=JSONObject(text(signed.url,signed))
-        if(data.optInt("code",-1)!=0) throw IOException("搜索接口暂不可用")
-        val tabs=data.optJSONArray("search_tabs") ?: data.optJSONObject("data")?.optJSONArray("search_tabs") ?: throw IOException("搜索格式异常")
+        val result=data ?: throw IOException("搜索接口暂不可用",lastFailure)
+        val tabs=result.optJSONArray("search_tabs") ?: result.optJSONObject("data")?.optJSONArray("search_tabs") ?: throw IOException("搜索格式异常")
         val tab=tabs.objects().firstOrNull { it.optInt("tab_type")==type.searchTab } ?: throw IOException("${type.label}搜索暂不可用")
         val list=mutableListOf<Series>()
         for(cell in (tab.optJSONArray("data") ?: JSONArray()).objects()) {
@@ -158,7 +185,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             }
         }
         synchronized(searchCursors) {
-            searchCursors[Triple(type,keyword,page)]=SearchCursor(tab.str("search_id"),tab.str("passback"),tab.str("next_offset").toIntOrNull(),clock())
+            searchCursors[Triple(type,keyword,page)]=SearchCursor(tab.str("search_id"),tab.str("passback"),tab.str("next_offset").toIntOrNull(),clock(),checkNotNull(activeDevice).deviceId)
             while(searchCursors.size>100) searchCursors.remove(searchCursors.keys.first())
         }
         return CatalogPage(valid(list),tab.optBoolean("has_more",false) && page<100)
