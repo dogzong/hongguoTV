@@ -31,7 +31,8 @@ class MainActivity: Activity() {
     private val accent=TvStyle.accent; private val white=TvStyle.text; private val muted=TvStyle.muted
     private val main=Handler(Looper.getMainLooper())
     private val io=Executors.newFixedThreadPool(3)
-    private val repository=ContentRepository()
+    private val playbackIdentity=com.hongguotv.core.PlaybackIdentity()
+    private val repository=ContentRepository(playbackIdentity=playbackIdentity)
     private val networkCleanup=Executors.newSingleThreadExecutor()
     private val prefetchWorker=Executors.newSingleThreadExecutor()
     private var prefetchHttp: okhttp3.OkHttpClient?=null
@@ -1053,7 +1054,7 @@ class MainActivity: Activity() {
         cancelPrefetch(); prefetchedFor=key; prefetchAttemptAt=now; prefetchAttempts++
         val ticket=preparedNext.begin(key)
         val http=okhttp3.OkHttpClient.Builder().connectTimeout(8,java.util.concurrent.TimeUnit.SECONDS).readTimeout(15,java.util.concurrent.TimeUnit.SECONDS).callTimeout(20,java.util.concurrent.TimeUnit.SECONDS).build()
-        val source=ContentRepository(http); prefetchHttp=http
+        val source=ContentRepository(http,playbackIdentity=playbackIdentity); prefetchHttp=http
         val scope=RequestScope(); prefetchScope=scope
         prefetchJob=prefetchWorker.submit {
             var remote: RemoteVideo?=null
@@ -1091,7 +1092,9 @@ class MainActivity: Activity() {
             addButton(controls,"停止自动重试") { cancelRecovery(); playbackText.text="自动重试已停止，观看位置已保留。" }
             autoRecovery=true; scheduleRecovery()
         }
-        android.util.Log.w("HongguoTV","Playback failure: ${problem.javaClass.simpleName}"+(if(problem is PlaybackException) " code=${problem.errorCodeName}" else ""))
+        val causeSummary=generateSequence(problem as Throwable?) { it.cause?.takeUnless { cause -> cause===it } }.take(3)
+            .map { "${it.javaClass.simpleName}: ${it.message.orEmpty().replace(Regex("https?://\\S+"),"[地址]").take(120)}" }.joinToString("; ")
+        android.util.Log.w("HongguoTV","Playback failure: $causeSummary"+(if(problem is PlaybackException) " code=${problem.errorCodeName}" else ""))
     }
     private fun hidePlaybackOverlay() {
         main.removeCallbacks(hideHud)

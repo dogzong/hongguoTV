@@ -27,7 +27,8 @@ class ContentRepositoryTest {
             else {
                 attempts++
                 assertEquals("/novel/player/video_model/v1/",request.url.encodedPath)
-                assertNotEquals(VendorConstants.device["device_id"],request.url.queryParameter("device_id"))
+                assertEquals("1234567890123456",request.url.queryParameter("device_id"))
+                assertEquals("2345678901234567",request.url.queryParameter("iid"))
                 val buffer=okio.Buffer(); request.body!!.writeTo(buffer)
                 val body=JSONObject(buffer.readUtf8())
                 assertEquals("123",body.getString("video_id"))
@@ -46,6 +47,33 @@ class ContentRepositoryTest {
         val error=assertThrows(IOException::class.java) { repo.stream("123") }
         assertTrue(error.cause!!.message!!.contains("101000"))
         assertEquals(2,count)
+    }
+
+    @Test fun playbackRegistersOnceAndReusesIdentityUntilRejected() {
+        var registrations=0; var models=0
+        val client=OkHttpClient.Builder().addInterceptor { chain ->
+            val request=chain.request()
+            val response=when(request.url.host) {
+                "log.snssdk.com" -> {
+                    registrations++
+                    """{"device_id_str":"123456789012345$registrations","install_id_str":"234567890123456$registrations"}"""
+                }
+                "example.com" -> """{"video_info":{"data":{"video_list":{"720p":{"main_url":"https://example.com/movie.mp4","codec_type":"h264","height":720}}}}}"""
+                else -> {
+                    models++
+                    if(models==2) "" else """{"code":0,"data":{"video_model":{"fallback_api":"https://example.com/stream"}}}"""
+                }
+            }
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("OK").body(response.toResponseBody()).build()
+        }.build()
+        val identity=PlaybackIdentity()
+        val first=ContentRepository(client,playbackIdentity=identity)
+        val second=ContentRepository(client,playbackIdentity=identity)
+        assertEquals("https://example.com/movie.mp4",first.stream("123").url)
+        assertEquals(1,registrations)
+        assertEquals("https://example.com/movie.mp4",second.stream("123").url)
+        assertEquals(2,registrations)
+        assertEquals(3,models)
     }
 
     @Test fun incompatibleByteVc2DoesNotBecomeAudioOnlyPlayback() {
@@ -72,8 +100,10 @@ class ContentRepositoryTest {
 
     private fun repository(clock: () -> Long = System::currentTimeMillis, respond: (Request) -> String) = ContentRepository(
         OkHttpClient.Builder().addInterceptor { chain ->
-            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
-                .code(200).message("OK").body(respond(chain.request()).toResponseBody()).build()
+            val request=chain.request()
+            val content=if(request.url.host=="log.snssdk.com") """{"device_id_str":"1234567890123456","install_id_str":"2345678901234567"}""" else respond(request)
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(content.toResponseBody()).build()
         }.build(),clock
     )
 

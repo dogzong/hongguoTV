@@ -25,8 +25,10 @@ jobs:
         with:
           path: ~/.android/debug.keystore
           key: hongguotv-recommendation-signing-v1
+      - name: Verify content and playback logic
+        run: ./kotlin-tv/gradlew -p kotlin-tv :core:test --console=plain
       - name: Assemble installable development APK
-        run: ./kotlin-tv/gradlew -p kotlin-tv :core:test :app:assembleDebug --console=plain
+        run: ./kotlin-tv/gradlew -p kotlin-tv :app:assembleDebug --console=plain
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: hongguotv-recommendation-dev-apk

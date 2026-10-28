@@ -9,6 +9,8 @@
 
 `kotlin-tv/` 原生应用源码和派生实现以 GPL-3.0-only 发布，许可证全文见 `LICENSE`。发布 APK 时同时提供本分支对应源码、Gradle 包装器和构建说明。APK 不包含 Node、React Native、JavaScript 引擎或该 JavaScript 源文件。`tools/signing-oracle.cjs` 仅为开发期生成对照测试数据的工具，不参与应用构建或运行。
 
+设备匿名注册请求字段参考 [HongguoTV-Phone-TV-NoAds](https://github.com/qq294716498/HongguoTV-Phone-TV-NoAds/blob/8eafa3908e9191c0a5ae186d5beff11e3a971f3c/native/core/provider_hongguo_device.go)。
+
 其他依赖：
 
 - ZXing core（本机生成手机输入与更新二维码）：https://github.com/zxing/zxing — Apache-2.0

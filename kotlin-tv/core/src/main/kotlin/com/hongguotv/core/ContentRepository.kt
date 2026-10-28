@@ -26,7 +26,7 @@ data class CatalogPage(val items: List<Series>, val hasMore: Boolean, val rankin
 data class StreamInfo(val url: String, val key: ByteArray?, val quality: String)
 class SearchSessionExpiredException: IOException("搜索结果已过期，请从第 1 页重新搜索")
 
-class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis) {
+class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis, private val playbackIdentity: PlaybackIdentity = PlaybackIdentity()) {
     private val signer = Signer()
     private val site = "https://hongguoduanju.com"
     private data class SearchCursor(val searchId: String, val passback: String, val offset: Int?, val updatedAt: Long)
@@ -181,15 +181,15 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         for(attempt in 0..1) {
             try {
                 val device=LinkedHashMap(VendorConstants.device)
-                val rng=java.security.SecureRandom()
-                device["device_id"]=(1_000_000_000_000_000L+(rng.nextLong() and Long.MAX_VALUE)%9_000_000_000_000_000L).toString()
-                device["iid"]=(1_000_000_000_000_000L+(rng.nextLong() and Long.MAX_VALUE)%9_000_000_000_000_000L).toString()
+                val identity=playbackIdentity.get(http)
+                device["device_id"]=identity.deviceId
+                device["iid"]=identity.installId
                 val signed=signer.sign("https://api5-normal-sinfonlineb.fqnovel.com/novel/player/video_model/v1/",device,payload)
                 val response=text(signed.url,signed)
-                if(response.isBlank()) throw IOException("播放接口返回空内容")
+                if(response.isBlank()) { playbackIdentity.invalidate(identity); throw IOException("播放接口返回空内容") }
                 val data=JSONObject(response)
                 val code=data.optInt("Code",data.optInt("code",0))
-                if(code!=0) throw IOException("播放接口返回错误码 $code")
+                if(code!=0) { if(code==101000) playbackIdentity.invalidate(identity); throw IOException("播放接口返回错误码 $code") }
                 val entry=data.optJSONObject("data") ?: throw IOException("播放信息为空")
                 model=entry.optJSONObject("video_model") ?: JSONObject(entry.str("video_model"))
                 break
