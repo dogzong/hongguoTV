@@ -173,14 +173,33 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
     fun stream(id: String, maxQuality: Int = 1080): StreamInfo {
         require(id.matches(Regex("[0-9]{1,30}")))
-        val payload="""{"biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$id"]}}""".toByteArray()
-        val signed=signer.sign("https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/",VendorConstants.device,payload)
-        val data=JSONObject(text(signed.url,signed))
-        if(data.optInt("Code",data.optInt("code",0))!=0) throw IOException("播放接口暂不可用")
-        val map=data.optJSONObject("data") ?: throw IOException("播放信息为空")
-        val entry=map.optJSONObject(id) ?: map.keys().asSequence().mapNotNull { map.optJSONObject(it) }.firstOrNull() ?: throw IOException("播放信息为空")
-        val model=entry.optJSONObject("video_model") ?: JSONObject(entry.str("video_model"))
-        val raw=model.opt("fallback_api")
+        // The old multi_video_model endpoint now returns 110001. The single-video
+        // endpoint expects a scalar video_id and returns the model directly in data.
+        val payload="""{"video_id":"$id","biz_param":{"detail_page_version":0,"device_level":3,"disable_digg_stat":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024}}""".toByteArray()
+        var model: JSONObject?=null
+        var lastFailure: Exception?=null
+        for(attempt in 0..1) {
+            try {
+                val device=LinkedHashMap(VendorConstants.device)
+                val rng=java.security.SecureRandom()
+                device["device_id"]=(1_000_000_000_000_000L+(rng.nextLong() and Long.MAX_VALUE)%9_000_000_000_000_000L).toString()
+                device["iid"]=(1_000_000_000_000_000L+(rng.nextLong() and Long.MAX_VALUE)%9_000_000_000_000_000L).toString()
+                val signed=signer.sign("https://api5-normal-sinfonlineb.fqnovel.com/novel/player/video_model/v1/",device,payload)
+                val response=text(signed.url,signed)
+                if(response.isBlank()) throw IOException("播放接口返回空内容")
+                val data=JSONObject(response)
+                val code=data.optInt("Code",data.optInt("code",0))
+                if(code!=0) throw IOException("播放接口返回错误码 $code")
+                val entry=data.optJSONObject("data") ?: throw IOException("播放信息为空")
+                model=entry.optJSONObject("video_model") ?: JSONObject(entry.str("video_model"))
+                break
+            } catch(e: Exception) {
+                if(e is java.io.InterruptedIOException || Thread.currentThread().isInterrupted) throw e
+                lastFailure=e
+            }
+        }
+        val videoModel=model ?: throw IOException("播放接口暂不可用",lastFailure)
+        val raw=videoModel.opt("fallback_api")
         val fallback=when(raw) { is JSONObject -> raw.str("fallback_api"); is JSONArray -> raw.optString(0); else -> runCatching { JSONObject(raw.toString()).str("fallback_api") }.getOrDefault(raw.toString()) }
         if(!fallback.startsWith("https://")) throw IOException("播放地址格式异常")
         val info=JSONObject(text(fallback)).optJSONObject("video_info")?.optJSONObject("data") ?: throw IOException("没有播放资源")

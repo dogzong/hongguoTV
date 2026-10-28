@@ -17,7 +17,35 @@ class ContentRepositoryTest {
             val rows=JSONObject()
             variants.forEachIndexed { index,(height,codec,url) -> rows.put("video_$index",JSONObject().put("vheight",height).put("codec_type",codec).put("main_url",url)) }
             JSONObject().put("video_info",JSONObject().put("data",JSONObject().put("video_list",rows))).toString()
-        } else """{"data":{"123":{"video_model":{"fallback_api":"https://example.com/stream"}}}}"""
+        } else """{"code":0,"data":{"video_model":{"fallback_api":"https://example.com/stream"}}}"""
+    }
+
+    @Test fun videoModelUsesSingleVideoEndpointAndReturnsFallbackStream() {
+        var attempts=0
+        val repo=repository { request ->
+            if(request.url.host=="example.com") """{"video_info":{"data":{"video_list":{"720p":{"main_url":"https://example.com/movie.mp4","codec_type":"h264","height":720}}}}}"""
+            else {
+                attempts++
+                assertEquals("/novel/player/video_model/v1/",request.url.encodedPath)
+                assertNotEquals(VendorConstants.device["device_id"],request.url.queryParameter("device_id"))
+                val buffer=okio.Buffer(); request.body!!.writeTo(buffer)
+                val body=JSONObject(buffer.readUtf8())
+                assertEquals("123",body.getString("video_id"))
+                assertFalse(body.has("mixed_video_id_map"))
+                assertEquals(1024,body.getJSONObject("biz_param").getInt("video_platform"))
+                if(attempts==1) "" else """{"code":0,"data":{"video_model":"{\"fallback_api\":\"https://example.com/stream\"}"}}"""
+            }
+        }
+        assertEquals("https://example.com/movie.mp4",repo.stream("123").url)
+        assertEquals(2,attempts)
+    }
+
+    @Test fun videoModelReportsNonzeroStatusAndEmptyBodies() {
+        var count=0
+        val repo=repository { count++; """{"code":101000,"message":"service error"}""" }
+        val error=assertThrows(IOException::class.java) { repo.stream("123") }
+        assertTrue(error.cause!!.message!!.contains("101000"))
+        assertEquals(2,count)
     }
 
     @Test fun incompatibleByteVc2DoesNotBecomeAudioOnlyPlayback() {
